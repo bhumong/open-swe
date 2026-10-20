@@ -16,12 +16,13 @@ directly comparable to martian's published numbers.
 
 import json
 import threading
+from collections.abc import Sequence
 from functools import cache
-from typing import Any, Literal, NotRequired, TypedDict
-from uuid import UUID
+from typing import Literal, NotRequired, TypedDict
 
 from langchain_core.language_models import BaseChatModel
-from langsmith.schemas import Example, Run
+from langfuse import Evaluation
+from langfuse.experiment import ExperimentItemResult
 
 from openswe.utils.gateway import gateway_overrides
 from openswe.utils.model import make_model
@@ -167,11 +168,11 @@ def _judge_pair(golden: ReviewComment, candidate: ReviewComment) -> PairResult:
     }
 
 
-_PER_EXAMPLE_COUNTS: dict[UUID, ExampleCounts] = {}
+_PER_EXAMPLE_COUNTS: dict[str, ExampleCounts] = {}
 _COUNTS_LOCK = threading.Lock()
 
 
-def _record_counts(example_id: UUID, counts: ExampleCounts) -> None:
+def _record_counts(example_id: str, counts: ExampleCounts) -> None:
     with _COUNTS_LOCK:
         _PER_EXAMPLE_COUNTS[example_id] = counts
 
@@ -297,14 +298,23 @@ def _is_medium_plus(comment: ReviewComment) -> bool:
     return comment.get("severity", "").casefold() in {"medium", "high", "critical"}
 
 
-def judge_match(run: Run, example: Example) -> dict[str, Any]:
-    """Judge every pair, then choose the strongest maximum-cardinality matching."""
-    raw_candidates = _coerce_comments((run.outputs or {}).get("comments"))
+def judge_match(
+    *,
+    input: object,
+    output: object,
+    expected_output: object,
+    **_: object,
+) -> list[Evaluation]:
+    """Score one Langfuse experiment item with the existing reviewer metrics."""
+    input_data = input if isinstance(input, dict) else {}
+    output_data = output if isinstance(output, dict) else {}
+    expected_data = expected_output if isinstance(expected_output, dict) else {}
+    raw_candidates = _coerce_comments(output_data.get("comments"))
     candidates, duplicate_count = _dedupe_candidates(raw_candidates)
-    goldens = _coerce_comments((example.outputs or {}).get("golden_comments"))
+    goldens = _coerce_comments(expected_data.get("golden_comments"))
 
     if not goldens:
-        return {"results": [{"key": "f1", "score": None, "comment": "no goldens"}]}
+        return []
 
     matrix = _build_matrix(candidates, goldens)
     selected_pairs = _select_pairs(matrix)
@@ -328,11 +338,21 @@ def judge_match(run: Run, example: Example) -> dict[str, Any]:
         name: _profile_counts(goldens, matched_goldens, fp, categories)
         for name, categories in PROFILE_CATEGORIES.items()
     }
-    repo = (example.inputs or {}).get("repo")
+    repo = input_data.get("repo")
     is_synthetic = isinstance(repo, str) and repo.startswith("ai-code-review-evaluation/")
 
+    metadata = _.get("metadata")
+    metadata_data = metadata if isinstance(metadata, dict) else {}
+    raw_item_id = _.get("item_id")
+    item_id = raw_item_id if isinstance(raw_item_id, str) else None
+    item_key = (
+        item_id
+        or metadata_data.get("source_identity")
+        or input_data.get("pr_url")
+        or json.dumps(input_data, sort_keys=True, default=str)
+    )
     _record_counts(
-        example.id,
+        str(item_key),
         {
             "tp": tp,
             "fp": fp,
@@ -376,36 +396,44 @@ def judge_match(run: Run, example: Example) -> dict[str, Any]:
             if not any(pair[0] == index for pair in selected)
         ],
     }
-    profile_results: list[dict[str, Any]] = []
+    profile_results: list[tuple[str, float]] = []
     for name, counts in profiles.items():
         profile_precision, profile_recall = _precision_recall(counts)
         profile_results.extend(
             [
-                {"key": f"{name}_precision", "score": profile_precision},
-                {"key": f"{name}_recall", "score": profile_recall},
-                {"key": f"{name}_f2", "score": _fbeta(profile_precision, profile_recall, 2.0)},
+                (f"{name}_precision", profile_precision),
+                (f"{name}_recall", profile_recall),
+                (f"{name}_f2", _fbeta(profile_precision, profile_recall, 2.0)),
             ]
         )
 
-    return {
-        "results": [
-            {"key": "f1", "score": f1},
-            {"key": "precision", "score": precision},
-            {"key": "recall", "score": recall},
-            {"key": "tp", "score": tp},
-            {"key": "fp", "score": fp},
-            {"key": "fn", "score": fn},
-            {"key": "n_candidates", "score": len(candidates)},
-            {"key": "n_candidates_raw", "score": len(raw_candidates)},
-            {"key": "n_duplicates", "score": duplicate_count},
-            {"key": "n_goldens", "score": len(goldens)},
-            {"key": "medium_plus_f1", "score": medium_f1},
-            {"key": "medium_plus_precision", "score": medium_precision},
-            {"key": "medium_plus_recall", "score": medium_recall},
-            *profile_results,
-            {"key": "pairwise_match_matrix", "value": json.dumps(matrix_feedback)},
-        ]
-    }
+    numeric_scores: list[tuple[str, int | float]] = [
+        ("f1", f1),
+        ("precision", precision),
+        ("recall", recall),
+        ("tp", tp),
+        ("fp", fp),
+        ("fn", fn),
+        ("n_candidates", len(candidates)),
+        ("n_candidates_raw", len(raw_candidates)),
+        ("n_duplicates", duplicate_count),
+        ("n_goldens", len(goldens)),
+        ("medium_plus_f1", medium_f1),
+        ("medium_plus_precision", medium_precision),
+        ("medium_plus_recall", medium_recall),
+        *profile_results,
+    ]
+    return [
+        *(
+            Evaluation(name=name, value=value, data_type="NUMERIC")
+            for name, value in numeric_scores
+        ),
+        Evaluation(
+            name="pairwise_match_matrix",
+            value=json.dumps(matrix_feedback),
+            data_type="CATEGORICAL",
+        ),
+    ]
 
 
 def _fbeta(p: float, r: float, beta: float = 1.0) -> float:
@@ -414,7 +442,7 @@ def _fbeta(p: float, r: float, beta: float = 1.0) -> float:
     return (1 + beta2) * p * r / denom if denom else 0.0
 
 
-def aggregate_pr(runs: list[Run], examples: list[Example]) -> dict[str, Any]:
+def aggregate_pr(*, item_results: Sequence[ExperimentItemResult], **_: object) -> list[Evaluation]:
     """Summary evaluator: micro/macro precision-recall-F1 across the experiment.
 
     Reads the per-example counts that ``judge_match`` stashed in the
@@ -423,12 +451,10 @@ def aggregate_pr(runs: list[Run], examples: list[Example]) -> dict[str, Any]:
     """
     counts = _drain_counts()
     if not counts:
-        return {"results": []}
+        return []
 
     results = _aggregate_metrics(counts)
-    results.extend(
-        _aggregate_metrics(counts, key_prefix="medium_plus_", field_prefix="medium_plus_")
-    )
+    results.extend(_aggregate_metrics(counts, key_prefix="medium_plus_", medium_plus=True))
     for profile in PROFILE_CATEGORIES:
         results.extend(_aggregate_profile(counts, profile))
     synthetic = [count for count in counts if count["is_synthetic"]]
@@ -437,65 +463,61 @@ def aggregate_pr(runs: list[Run], examples: list[Example]) -> dict[str, Any]:
         results.extend(_aggregate_metrics(synthetic, key_prefix="synthetic_"))
     if upstream:
         results.extend(_aggregate_metrics(upstream, key_prefix="upstream_"))
-    return {"results": results}
+    return results
 
 
 def _aggregate_metrics(
     counts: list[ExampleCounts],
     *,
     key_prefix: str = "",
-    field_prefix: str = "",
-) -> list[dict[str, Any]]:
-    tp_key = f"{field_prefix}tp"
-    fp_key = f"{field_prefix}fp"
-    fn_key = f"{field_prefix}fn"
-    precision_key = f"{field_prefix}precision"
-    recall_key = f"{field_prefix}recall"
-    f1_key = f"{field_prefix}f1"
-    micro_tp = sum(int(count[tp_key]) for count in counts)
-    micro_fp = sum(int(count[fp_key]) for count in counts)
-    micro_fn = sum(int(count[fn_key]) for count in counts)
+    medium_plus: bool = False,
+) -> list[Evaluation]:
+    if medium_plus:
+        micro_tp = sum(count["medium_plus_tp"] for count in counts)
+        micro_fp = sum(count["medium_plus_fp"] for count in counts)
+        micro_fn = sum(count["medium_plus_fn"] for count in counts)
+        macro_precision = sum(count["medium_plus_precision"] for count in counts)
+        macro_recall = sum(count["medium_plus_recall"] for count in counts)
+        macro_f1 = sum(count["medium_plus_f1"] for count in counts)
+    else:
+        micro_tp = sum(count["tp"] for count in counts)
+        micro_fp = sum(count["fp"] for count in counts)
+        micro_fn = sum(count["fn"] for count in counts)
+        macro_precision = sum(count["precision"] for count in counts)
+        macro_recall = sum(count["recall"] for count in counts)
+        macro_f1 = sum(count["f1"] for count in counts)
     micro_precision = micro_tp / (micro_tp + micro_fp) if micro_tp + micro_fp else 0.0
     micro_recall = micro_tp / (micro_tp + micro_fn) if micro_tp + micro_fn else 0.0
     count = len(counts)
-    return [
-        {"key": f"{key_prefix}micro_precision", "score": micro_precision},
-        {"key": f"{key_prefix}micro_recall", "score": micro_recall},
-        {"key": f"{key_prefix}micro_f1", "score": _fbeta(micro_precision, micro_recall)},
-        {"key": f"{key_prefix}micro_f2", "score": _fbeta(micro_precision, micro_recall, 2.0)},
-        {
-            "key": f"{key_prefix}macro_precision",
-            "score": sum(float(item[precision_key]) for item in counts) / count,
-        },
-        {
-            "key": f"{key_prefix}macro_recall",
-            "score": sum(float(item[recall_key]) for item in counts) / count,
-        },
-        {
-            "key": f"{key_prefix}macro_f1",
-            "score": sum(float(item[f1_key]) for item in counts) / count,
-        },
-        {"key": f"{key_prefix}total_tp", "score": micro_tp},
-        {"key": f"{key_prefix}total_fp", "score": micro_fp},
-        {"key": f"{key_prefix}total_fn", "score": micro_fn},
+    metrics: list[tuple[str, int | float]] = [
+        (f"{key_prefix}micro_precision", micro_precision),
+        (f"{key_prefix}micro_recall", micro_recall),
+        (f"{key_prefix}micro_f1", _fbeta(micro_precision, micro_recall)),
+        (f"{key_prefix}micro_f2", _fbeta(micro_precision, micro_recall, 2.0)),
+        (f"{key_prefix}macro_precision", macro_precision / count),
+        (f"{key_prefix}macro_recall", macro_recall / count),
+        (f"{key_prefix}macro_f1", macro_f1 / count),
+        (f"{key_prefix}total_tp", micro_tp),
+        (f"{key_prefix}total_fp", micro_fp),
+        (f"{key_prefix}total_fn", micro_fn),
     ]
+    return [Evaluation(name=name, value=value, data_type="NUMERIC") for name, value in metrics]
 
 
-def _aggregate_profile(
-    counts: list[ExampleCounts], profile: ScoringProfile
-) -> list[dict[str, Any]]:
+def _aggregate_profile(counts: list[ExampleCounts], profile: ScoringProfile) -> list[Evaluation]:
     total: ProfileCounts = {
         "tp": sum(count["profiles"][profile]["tp"] for count in counts),
         "fp": sum(count["profiles"][profile]["fp"] for count in counts),
         "fn": sum(count["profiles"][profile]["fn"] for count in counts),
     }
     precision, recall = _precision_recall(total)
-    return [
-        {"key": f"{profile}_micro_precision", "score": precision},
-        {"key": f"{profile}_micro_recall", "score": recall},
-        {"key": f"{profile}_micro_f1", "score": _fbeta(precision, recall)},
-        {"key": f"{profile}_micro_f2", "score": _fbeta(precision, recall, 2.0)},
-        {"key": f"{profile}_total_tp", "score": total["tp"]},
-        {"key": f"{profile}_total_fp", "score": total["fp"]},
-        {"key": f"{profile}_total_fn", "score": total["fn"]},
+    metrics: list[tuple[str, int | float]] = [
+        (f"{profile}_micro_precision", precision),
+        (f"{profile}_micro_recall", recall),
+        (f"{profile}_micro_f1", _fbeta(precision, recall)),
+        (f"{profile}_micro_f2", _fbeta(precision, recall, 2.0)),
+        (f"{profile}_total_tp", total["tp"]),
+        (f"{profile}_total_fp", total["fp"]),
+        (f"{profile}_total_fn", total["fn"]),
     ]
+    return [Evaluation(name=name, value=value, data_type="NUMERIC") for name, value in metrics]

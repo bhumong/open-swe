@@ -1,3 +1,4 @@
+from importlib import import_module
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,6 +12,8 @@ from langgraph.runtime import Runtime
 from openswe.agent_cost import finalize_agent_invocation_usage
 from openswe.middleware.model_fallback import ModelFallbackMiddleware
 from openswe.middleware.record_run_usage import record_run_usage
+
+record_run_usage_module = import_module("openswe.middleware.record_run_usage")
 
 
 def _message(input_tokens: int, output_tokens: int) -> AIMessage:
@@ -116,6 +119,31 @@ async def test_tags_model_responses_with_run_id() -> None:
 
     assert result.result[0].response_metadata["open_swe_invocation_id"] == "run-1"
     assert result.result[0].response_metadata["open_swe_run_id"] == "run-1"
+
+
+def test_tags_current_langfuse_observation_with_model_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = MagicMock()
+    monkeypatch.setattr(
+        record_run_usage_module, "get_langfuse_client", lambda: client, raising=False
+    )
+
+    record_run_usage_module._tag_run_metadata({"open_swe_model_route": "balanced"})
+
+    client.update_current_span.assert_called_once_with(
+        metadata={"open_swe_model_route": "balanced"}
+    )
+
+
+def test_model_route_tracing_failure_is_non_fatal(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = MagicMock()
+    client.update_current_span.side_effect = RuntimeError("offline")
+    monkeypatch.setattr(
+        record_run_usage_module, "get_langfuse_client", lambda: client, raising=False
+    )
+
+    record_run_usage_module._tag_run_metadata({"open_swe_model_route": "balanced"})
 
 
 @pytest.mark.asyncio

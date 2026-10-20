@@ -68,6 +68,7 @@ from openswe.tools import (
 from openswe.tools.propose_pr_review import propose_pr_review
 from openswe.tools.propose_review_comment import propose_review_comment
 from openswe.utils.deferred_model import make_deferred_error_model
+from openswe.utils.langfuse import configure_graph_tracing
 from openswe.utils.model import DEFAULT_LLM_REASONING, make_model, provider_model_kwargs
 
 logger = logging.getLogger(__name__)
@@ -170,7 +171,7 @@ async def get_chat_agent(config: RunnableConfig) -> Pregel:
             middleware=[
                 AnthropicPromptCachingMiddleware(ttl="1h", unsupported_model_behavior="ignore")
             ],
-        ).with_config(bindable_config(config))
+        ).with_config(configure_graph_tracing(bindable_config(config), graph_name="chat"))
 
     settings = await cached_workspace_settings(cfg.workspace_slug)
     model_id, effort = await _resolve_chat_model(cfg)
@@ -212,8 +213,8 @@ async def get_chat_agent(config: RunnableConfig) -> Pregel:
                 ModelCallTimeoutMiddleware(),
             ],
         ),
-    ).with_config(bindable_config(config))
+    ).with_config(configure_graph_tracing(bindable_config(config), graph_name="chat"))
 
 
-# langgraph.json entrypoint. Runs trace into LANGSMITH_PROJECT like everything else.
+# langgraph.json entrypoint; graph tracing is configured in both factory paths above.
 traced_chat_agent = get_chat_agent

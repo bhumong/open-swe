@@ -253,7 +253,7 @@ async def test_get_thread_counts_pending_run_outside_history_window(
     monkeypatch.setattr(threads_tool, "get_plan_content", AsyncMock(return_value={}))
     monkeypatch.setattr(threads_tool, "list_plan_comments", AsyncMock(return_value=[]))
     monkeypatch.setattr(threads_tool, "get_workflow_push_approvals", AsyncMock(return_value={}))
-    monkeypatch.setattr(threads_tool, "get_langsmith_thread_cost", AsyncMock(return_value=None))
+    monkeypatch.setattr(threads_tool, "get_trace_cost", AsyncMock(return_value=None))
 
     result = await threads_tool.get_thread("thread-1")
 
@@ -307,7 +307,7 @@ async def test_get_thread_rejects_untrusted_dashboard_url_before_access(
     assert result == {
         "success": False,
         "error": (
-            "thread_id must be an exact thread ID, Open SWE dashboard URL, Slack link, or LangSmith trace URL"
+            "thread_id must be an exact thread ID, Open SWE dashboard URL, Slack link, or configured Langfuse trace URL"
         ),
     }
     get_dashboard_thread.assert_not_awaited()

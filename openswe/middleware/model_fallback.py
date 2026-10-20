@@ -38,10 +38,10 @@ from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.exceptions import ModelError
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
-from langsmith import trace
 
 from openswe.middleware.trace import OpenSWEMiddleware
 from openswe.utils.errors import classify_exception, error_tracking_fields, exception_fields
+from openswe.utils.langfuse import langfuse_observation
 
 logger = logging.getLogger(__name__)
 
@@ -230,16 +230,20 @@ class ModelFallbackMiddleware(OpenSWEMiddleware):
                 if isinstance(status_code, int):
                     metadata["status_code"] = status_code
                 retry_error: Exception | None = None
-                async with trace("model_retry", inputs={}, metadata=metadata) as retry_span:
+                async with langfuse_observation(
+                    "model_retry", input={}, metadata=metadata
+                ) as retry_span:
                     try:
                         if delay > 0:
                             await asyncio.sleep(delay)
                         response = await handler(attempt_request)
                     except Exception as exc:
-                        retry_span.end(error=type(exc).__name__)
+                        if retry_span is not None:
+                            retry_span.update(level="ERROR", status_message=type(exc).__name__)
                         retry_error = exc
                     else:
-                        retry_span.end(outputs={"outcome": "success"})
+                        if retry_span is not None:
+                            retry_span.update(output={"outcome": "success"})
                         return response
                 if retry_error is not None:
                     raise retry_error

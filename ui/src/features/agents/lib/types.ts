@@ -550,9 +550,9 @@ export interface AgentThread {
   createdAt: number
   updatedAt: number
   traceUrl?: string | null
-  /** LangSmith cost of the thread's finished runs so far, in USD. */
+  /** Langfuse cost of the thread's finished runs so far, in USD. */
   costUsd?: number | null
-  /** LangSmith cost of each finished run, in USD, by invocation id. */
+  /** Langfuse cost of each finished run, in USD, by invocation id. */
   runCosts?: Record<string, number>
   sourceUrl?: string | null
   sourceAppUrl?: string | null

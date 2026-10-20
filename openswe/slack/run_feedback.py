@@ -14,7 +14,7 @@ from openswe.slack.payloads import (
     SlackPayload,
     parse_json_object,
 )
-from openswe.utils.langsmith import create_langsmith_feedback
+from openswe.utils.langfuse import create_trace_score
 from openswe.utils.thread_ops import langgraph_client
 
 logger = logging.getLogger(__name__)
@@ -72,7 +72,7 @@ async def process_feedback(interaction: SlackInteraction, action: SlackBlockActi
         async with slack_thread_mutation_lock(
             client, channel_id, message_ts, purpose=f"run_feedback:{user_id}"
         ):
-            saved = await create_langsmith_feedback(
+            saved = await create_trace_score(
                 selection.run_id,
                 key,
                 score=1.0 if selection.rating == "up" else 0.0,
@@ -82,6 +82,11 @@ async def process_feedback(interaction: SlackInteraction, action: SlackBlockActi
                     "message_ts": message_ts,
                     "user_id": user_id,
                 },
+                thread_id=(
+                    mapping.get("agent_thread_id")
+                    if isinstance(mapping.get("agent_thread_id"), str)
+                    else None
+                ),
             )
         if saved:
             await record_feedback_submission(

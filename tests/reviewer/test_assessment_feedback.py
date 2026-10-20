@@ -31,7 +31,7 @@ async def test_feedback_is_per_person_and_published_assessment(fake_store: FakeS
             AsyncMock(return_value="t"),
         ),
         patch(
-            "openswe.review.assessment_feedback.create_langsmith_feedback", new_callable=AsyncMock
+            "openswe.review.assessment_feedback.create_trace_score", new_callable=AsyncMock
         ) as trace_feedback,
     ):
         first = await submit_assessment_feedback(
@@ -105,7 +105,7 @@ async def test_trace_failure_does_not_lose_saved_feedback(fake_store: FakeStore)
             AsyncMock(side_effect=[assessment, RuntimeError("store unavailable")]),
         ),
         patch(
-            "openswe.review.assessment_feedback.create_langsmith_feedback",
+            "openswe.review.assessment_feedback.create_trace_score",
             AsyncMock(side_effect=RuntimeError("trace unavailable")),
         ),
     ):

@@ -10,11 +10,14 @@ verbatim form martian published.
 import logging
 import os
 import threading
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from langgraph_sdk import get_client
+from langgraph_sdk.schema import Config, Context, Input
 
 from openswe.input_messages import build_run_input
+from openswe.invocation import new_invocation_id, with_invocation_id
 from openswe.remote_runtime.client import remote_run_context, remote_runtime_client
 from openswe.remote_runtime.reviewer import MCP_SERVER_NAME
 from openswe.review.findings import (
@@ -113,21 +116,24 @@ def _build_user_message(inputs: dict[str, Any]) -> str:
     )
 
 
-def _build_configurable(inputs: dict[str, Any]) -> dict[str, Any]:
+def _build_configurable(inputs: dict[str, Any], *, invocation_id: str) -> dict[str, Any]:
     repo = inputs.get("repo", "")
     owner, _, name = repo.partition("/") if isinstance(repo, str) else ("", "", "")
-    configurable: dict[str, Any] = {
-        "__is_for_execution__": True,
-        "reviewer_eval": True,
-        "eval": True,
-        "repo": {"owner": owner, "name": name},
-        "pr_number": inputs.get("pr_number"),
-        "pr_url": inputs.get("pr_url", ""),
-        "base_sha": inputs.get("base_sha", ""),
-        "head_sha": inputs.get("head_sha", ""),
-        "branch_name": inputs.get("head_ref", ""),
-        "reviewer_eval_severity_threshold": _score_severity_threshold(),
-    }
+    configurable: dict[str, Any] = with_invocation_id(
+        {
+            "__is_for_execution__": True,
+            "reviewer_eval": True,
+            "eval": True,
+            "repo": {"owner": owner, "name": name},
+            "pr_number": inputs.get("pr_number"),
+            "pr_url": inputs.get("pr_url", ""),
+            "base_sha": inputs.get("base_sha", ""),
+            "head_sha": inputs.get("head_sha", ""),
+            "branch_name": inputs.get("head_ref", ""),
+            "reviewer_eval_severity_threshold": _score_severity_threshold(),
+        },
+        invocation_id,
+    )
     model_id = get_reviewer_model_id()
     if model_id:
         configurable["reviewer_model_id"] = model_id
@@ -138,7 +144,7 @@ def _build_configurable(inputs: dict[str, Any]) -> dict[str, Any]:
 
 
 async def review_pr(inputs: dict[str, Any]) -> dict[str, Any]:
-    """LangSmith target: run the reviewer agent on one PR."""
+    """Run the reviewer agent on one Langfuse dataset item."""
     repo = inputs.get("repo", "")
     pr_number = inputs.get("pr_number")
     pr_url = inputs.get("pr_url", "")
@@ -168,7 +174,9 @@ async def review_pr(inputs: dict[str, Any]) -> dict[str, Any]:
             }
         ],
     )
-    configurable = _build_configurable(inputs)
+    invocation_id = new_invocation_id()
+    invocation_started_at = datetime.now(UTC).isoformat()
+    configurable = _build_configurable(inputs, invocation_id=invocation_id)
     try:
         # Mirrors dispatch: with REVIEWER_RUNTIME_URL set, the run executes on that
         # deployment while this backend keeps the thread the publication is written to.
@@ -177,16 +185,19 @@ async def review_pr(inputs: dict[str, Any]) -> dict[str, Any]:
             result = await client.runs.wait(
                 thread_id,
                 assistant_id=assistant_id,
-                input=run_input,
-                config={"configurable": configurable},
+                input=cast(Input, run_input),
+                config=cast(Config, {"configurable": configurable}),
             )
         else:
             result = await remote_client.runs.wait(
                 thread_id,
                 assistant_id=assistant_id,
-                input=run_input,
-                context=await remote_run_context(
-                    configurable, thread_id=thread_id, assistant_id=assistant_id
+                input=cast(Input, run_input),
+                context=cast(
+                    Context,
+                    await remote_run_context(
+                        configurable, thread_id=thread_id, assistant_id=assistant_id
+                    ),
                 ),
                 if_not_exists="create",
             )
@@ -206,6 +217,8 @@ async def review_pr(inputs: dict[str, Any]) -> dict[str, Any]:
         _record_completed()
         return {
             "thread_id": thread_id,
+            "invocation_id": invocation_id,
+            "invocation_started_at": invocation_started_at,
             "pr_url": pr_url,
             "comments": comments,
             "score_mode": score_mode,

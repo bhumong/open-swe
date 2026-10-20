@@ -55,7 +55,7 @@ from openswe.source_context import SlackThreadRef, SourceContext
 from openswe.users import User, persist_display_name
 from openswe.utils.http_pool import pooled_transport
 from openswe.utils.json_types import as_json_object
-from openswe.utils.langsmith import create_langsmith_feedback, get_langsmith_trace_url
+from openswe.utils.langfuse import create_trace_score, get_thread_trace_url
 from openswe.utils.thread_ops import (
     langgraph_client as get_langgraph_client,
 )
@@ -164,7 +164,7 @@ async def _slack_channel_identity(
     dashboard_url = common.dashboard_thread_url(thread_id)
     if dashboard_url:
         channel["web_url"] = dashboard_url
-    trace_url = await get_langsmith_trace_url(thread_id)
+    trace_url = await get_thread_trace_url(thread_id, external=True)
     if trace_url:
         channel["trace_url"] = trace_url
     return channel
@@ -1464,11 +1464,12 @@ async def _process_slack_mention_impl(
     run_id = run.get("run_id")
     if performance_command and thread_model_choice and isinstance(run_id, str) and run_id:
         selected_model = image_model_override or thread_model_choice
-        await create_langsmith_feedback(
+        await create_trace_score(
             run_id,
             "performance_model_switch_slack",
             score=1,
             source_info={"model_id": selected_model[0], "effort": selected_model[1]},
+            thread_id=thread_id,
         )
     if code_channel and isinstance(run_id, str) and run_id:
         stream_thread_ts = reply_thread_ts or thread_ts

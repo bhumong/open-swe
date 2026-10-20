@@ -81,7 +81,7 @@ async def test_dashboard_cannot_act_on_a_bot_thread(bot_thread, login):
 
 
 async def test_summary_names_the_starting_bot(bot_thread, monkeypatch):
-    monkeypatch.setattr(summary, "get_langsmith_trace_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(summary, "get_thread_trace_url", AsyncMock(return_value=None))
     result = await summary._thread_summary(bot_thread[0])
     assert result["triggerKind"] == "slack_bot"
     assert result["triggeringBot"] == {"key": "T123:B123", "name": "Release bot"}

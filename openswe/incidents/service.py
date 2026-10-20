@@ -25,7 +25,7 @@ from openswe.slack.channels import SlackChannel
 from openswe.slack.http import SlackClient
 from openswe.store import TypedStore, now_iso
 from openswe.ui_invalidations import Topic
-from openswe.utils.langsmith import get_langsmith_trace_url
+from openswe.utils.langfuse import get_thread_trace_url
 
 logger = logging.getLogger(__name__)
 POLICIES = TypedStore(
@@ -399,7 +399,7 @@ async def get_incident(id: IncidentId, *, include_setup: bool = False) -> dict[s
         "coverage": {"gaps": latest.report.gaps if latest else []},
         "activity": [item.model_dump() for item in activity],
         "allowed_actions": actions,
-        "trace_url": await get_langsmith_trace_url(record.thread_id) if record.thread_id else None,
+        "trace_url": await get_thread_trace_url(record.thread_id) if record.thread_id else None,
         "next_cursor": None,
     }
 

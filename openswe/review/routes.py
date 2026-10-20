@@ -129,7 +129,7 @@ async def admin_start_reviewer_eval(
     body: ReviewerEvalStart,
     session: dict[str, Any] = ADMIN_DEP,
 ) -> dict[str, Any]:
-    """Launch the reviewer eval in a LangSmith sandbox with the given run config."""
+    """Launch the reviewer eval in the local process or deployment worker."""
     config = resolve_eval_config()
     config.update(body.model_dump(exclude={"limit"}))
     try:

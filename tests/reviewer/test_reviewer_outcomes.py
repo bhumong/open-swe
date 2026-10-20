@@ -1,4 +1,8 @@
-from typing import Any, cast
+import asyncio
+from collections.abc import Callable
+from typing import TypedDict, cast
+
+from langfuse.api import NotFoundError
 
 from openswe.review.findings import Finding
 from openswe.utils import reviewer_outcomes
@@ -6,47 +10,121 @@ from openswe.utils.reviewer_outcomes import (
     FALSE_POSITIVE,
     TRUE_POSITIVE,
     upsert_finding_outcome,
+    upsert_run_outcome,
 )
+from openswe.utils.typed_json import JsonObject
 
 
-class _FakeDataset:
-    def __init__(self, dataset_id: str, name: str) -> None:
-        self.id = dataset_id
-        self.name = name
+class _DatasetRecord(TypedDict):
+    name: str
+    description: str | None
+
+
+class _DatasetItemRecord(TypedDict):
+    dataset_name: str
+    id: str
+    input: JsonObject
+    expected_output: JsonObject
+    metadata: JsonObject
+
+
+class _OutcomeInput(TypedDict, total=False):
+    repo: str | None
+    pr_number: int | None
+    pr_url: str
+    file: str | None
+    start_line: int | None
+    end_line: int | None
+    side: str
+    diff_hunk: str | None
+    base_sha: str
+    head_sha: str
+    run_id: str
+    channel_id: str
+
+
+class _FindingOutput(TypedDict, total=False):
+    label: str
+    label_source: str
+    finding: dict[str, object]
+    resolution_note: str | None
+
+
+class _RunOutput(TypedDict):
+    label: str
+    label_source: str
+
+
+class _FakeDatasets:
+    def __init__(self, exists: bool = True) -> None:
+        self.exists = exists
+        self.lookups: list[str] = []
+
+    def get(self, *, dataset_name: str) -> object:
+        self.lookups.append(dataset_name)
+        if not self.exists:
+            raise NotFoundError({}, {})
+        return object()
+
+
+class _FakeApi:
+    def __init__(self, exists: bool = True) -> None:
+        self.datasets = _FakeDatasets(exists)
 
 
 class _FakeClient:
-    def __init__(self) -> None:
-        self.created: list[dict[str, Any]] = []
-        self.updated: list[dict[str, Any]] = []
-        self.conflict_once = False
+    def __init__(self, exists: bool = True) -> None:
+        self.api = _FakeApi(exists)
+        self.dataset_items: list[_DatasetItemRecord] = []
+        self.created_datasets: list[_DatasetRecord] = []
 
-    async def __aenter__(self) -> _FakeClient:
-        return self
+    def create_dataset(self, *, name: str, description: str | None = None) -> object:
+        self.created_datasets.append({"name": name, "description": description})
+        return object()
 
-    async def __aexit__(self, *exc: Any) -> None:
-        return None
-
-    async def read_dataset(self, dataset_name: str) -> _FakeDataset:
-        return _FakeDataset("ds_123", dataset_name)
-
-    async def create_example(self, **kwargs: Any) -> None:
-        if self.conflict_once:
-            self.conflict_once = False
-            raise RuntimeError("already exists")
-        self.created.append(kwargs)
-
-    def update_example(self, **kwargs: Any) -> None:
-        self.updated.append(kwargs)
+    def create_dataset_item(
+        self,
+        *,
+        dataset_name: str,
+        id: str,
+        input: JsonObject,
+        expected_output: JsonObject,
+        metadata: JsonObject,
+    ) -> object:
+        self.dataset_items.append(
+            {
+                "dataset_name": dataset_name,
+                "id": id,
+                "input": input,
+                "expected_output": expected_output,
+                "metadata": metadata,
+            }
+        )
+        return object()
 
 
 def _patch_client(monkeypatch, fake: _FakeClient | None) -> None:  # noqa: ANN001
-    if fake is None:
-        monkeypatch.setattr(reviewer_outcomes, "_outcomes_credentials", lambda: None)
-        return
-    monkeypatch.setattr(reviewer_outcomes, "_outcomes_credentials", lambda: ("k", "https://api"))
-    monkeypatch.setattr(reviewer_outcomes, "async_langsmith_client", lambda *a: fake)
-    monkeypatch.setattr(reviewer_outcomes, "sync_langsmith_client", lambda *a: cast(Any, fake))
+    monkeypatch.setattr(reviewer_outcomes, "get_langfuse_client", lambda: fake)
+
+
+async def _run_inline[**P, T](func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+    return func(*args, **kwargs)
+
+
+def _patch_thread_offload(monkeypatch) -> None:  # noqa: ANN001
+    # Python 3.14 thread wakeups are unavailable in this sandbox. These tests
+    # exercise the dataset payload and don't need to validate asyncio's executor.
+    monkeypatch.setattr(asyncio, "to_thread", _run_inline)
+
+
+def test_outcome_item_ids_are_scoped_to_the_dataset(monkeypatch) -> None:  # noqa: ANN001
+    finding_id = reviewer_outcomes._example_id("o/r", "f_abc", "resolved_by_commit")
+    run_id = reviewer_outcomes._run_example_id("run_1", "slack_thumbs_up")
+
+    monkeypatch.setattr(reviewer_outcomes, "OUTCOMES_DATASET_NAME", "alternate-outcomes")
+
+    assert reviewer_outcomes._example_id("o/r", "f_abc", "resolved_by_commit") != finding_id
+    assert reviewer_outcomes._run_example_id("run_1", "slack_thumbs_up") != run_id
 
 
 def _finding() -> Finding:
@@ -71,9 +149,10 @@ def _finding() -> Finding:
     )
 
 
-async def test_upsert_finding_outcome_builds_payload(monkeypatch) -> None:  # noqa: ANN001
-    fake = _FakeClient()
+async def test_upsert_finding_outcome_creates_dataset_and_stable_item(monkeypatch) -> None:  # noqa: ANN001
+    fake = _FakeClient(exists=False)
     _patch_client(monkeypatch, fake)
+    _patch_thread_offload(monkeypatch)
 
     ok = await upsert_finding_outcome(
         _finding(),
@@ -87,28 +166,52 @@ async def test_upsert_finding_outcome_builds_payload(monkeypatch) -> None:  # no
         thread_id="t1",
     )
     assert ok
-    assert len(fake.created) == 1
-    call = fake.created[0]
-    assert call["dataset_id"] == "ds_123"
-    assert call["inputs"]["repo"] == "o/r"
-    assert call["inputs"]["file"] == "app/x.rb"
-    assert call["inputs"]["diff_hunk"].startswith("@@")
-    assert call["outputs"]["label"] == TRUE_POSITIVE
-    assert call["outputs"]["label_source"] == "resolved_by_commit"
-    assert call["outputs"]["finding"]["severity"] == "high"
+    assert fake.api.datasets.lookups == [reviewer_outcomes.OUTCOMES_DATASET_NAME]
+    assert fake.created_datasets[0]["name"] == reviewer_outcomes.OUTCOMES_DATASET_NAME
+    assert len(fake.dataset_items) == 1
+    call = fake.dataset_items[0]
+    inputs = cast(_OutcomeInput, call["input"])
+    expected_output = cast(_FindingOutput, call["expected_output"])
+    assert call["dataset_name"] == reviewer_outcomes.OUTCOMES_DATASET_NAME
+    assert call["id"] == str(reviewer_outcomes._example_id("o/r", "f_abc", "resolved_by_commit"))
+    assert inputs["repo"] == "o/r"
+    assert inputs["file"] == "app/x.rb"
+    assert inputs["diff_hunk"] is not None and inputs["diff_hunk"].startswith("@@")
+    assert expected_output["label"] == TRUE_POSITIVE
+    assert expected_output["label_source"] == "resolved_by_commit"
+    assert expected_output["finding"]["severity"] == "high"
     assert call["metadata"]["granularity"] == "finding"
     assert call["metadata"]["repo"] == "o/r"
     assert call["metadata"]["run_id"] == "run_1"
 
 
-async def test_upsert_finding_outcome_updates_on_conflict(monkeypatch) -> None:  # noqa: ANN001
+async def test_upsert_run_outcome_uses_deterministic_item_id(monkeypatch) -> None:  # noqa: ANN001
     fake = _FakeClient()
-    fake.conflict_once = True
     _patch_client(monkeypatch, fake)
+    _patch_thread_offload(monkeypatch)
 
-    ok = await upsert_finding_outcome(
+    ok = await upsert_run_outcome(
+        label=FALSE_POSITIVE,
+        label_source="slack_thumbs_down",
+        run_id="run_1",
+        repo="o/r",
+        extra={"channel_id": "C1"},
+    )
+
+    assert ok
+    call = fake.dataset_items[0]
+    inputs = cast(_OutcomeInput, call["input"])
+    expected_output = cast(_RunOutput, call["expected_output"])
+    assert call["id"] == str(reviewer_outcomes._run_example_id("run_1", "slack_thumbs_down"))
+    assert inputs == {"repo": "o/r", "run_id": "run_1", "channel_id": "C1"}
+    assert expected_output == {
+        "label": FALSE_POSITIVE,
+        "label_source": "slack_thumbs_down",
+    }
+
+
+async def test_outcome_write_is_best_effort_without_langfuse(monkeypatch) -> None:  # noqa: ANN001
+    _patch_client(monkeypatch, None)
+    assert not await upsert_finding_outcome(
         _finding(), label=FALSE_POSITIVE, label_source="dismissed", repo="o/r"
     )
-    assert ok
-    assert not fake.created
-    assert len(fake.updated) == 1

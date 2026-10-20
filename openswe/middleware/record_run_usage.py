@@ -12,24 +12,20 @@ from langgraph.runtime import Runtime
 from openswe.agent_cost import finalize_agent_invocation_usage
 from openswe.middleware.trace import OpenSWEMiddleware
 from openswe.run_config import RunConfig
+from openswe.utils.langfuse import get_langfuse_client
 
 logger = logging.getLogger(__name__)
 
 
 def _tag_run_metadata(extra_metadata: dict[str, Any]) -> None:
-    """Attach ``extra_metadata`` to the current LangSmith run, best-effort."""
-    try:
-        from langsmith.run_helpers import get_current_run_tree
-
-        run_tree = get_current_run_tree()
-    except Exception:  # noqa: BLE001
-        run_tree = None
-    if run_tree is None:
+    """Attach metadata to the active Langfuse observation, best-effort."""
+    client = get_langfuse_client()
+    if client is None:
         return
     try:
-        run_tree.metadata.update(extra_metadata)
+        client.update_current_span(metadata=extra_metadata)
     except Exception:  # noqa: BLE001
-        logger.debug("Could not tag run metadata", exc_info=True)
+        logger.debug("Could not tag Langfuse observation metadata", exc_info=True)
 
 
 class RecordRunUsageMiddleware(OpenSWEMiddleware):

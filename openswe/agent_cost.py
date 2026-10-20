@@ -1,4 +1,4 @@
-"""Deferred LangSmith cost enrichment for agent usage records."""
+"""Deferred Langfuse cost enrichment for agent usage records."""
 
 import logging
 from collections.abc import Mapping
@@ -14,7 +14,7 @@ from openswe.analytics.usage import (
     record_agent_invocation_cost,
 )
 from openswe.invocation import resolve_invocation_id
-from openswe.utils.langsmith import LangSmithCostUnavailable, get_langsmith_thread_cost
+from openswe.utils.langfuse import LangfuseCostUnavailable, get_trace_cost
 from openswe.utils.run_usage import summarize_run_usage
 from openswe.utils.thread_ops import langgraph_client
 
@@ -130,10 +130,10 @@ async def run_agent_cost_refresh(
         cost_kwargs: dict[str, Any] = {"run_only": True}
         if started_at := payload.get("invocation_started_at"):
             cost_kwargs["lookup_start"] = started_at
-        snapshot = await get_langsmith_thread_cost(
+        snapshot = await get_trace_cost(
             payload["thread_id"], payload["invocation_id"], **cost_kwargs
         )
-    except LangSmithCostUnavailable as exc:
+    except LangfuseCostUnavailable as exc:
         logger.info(
             "Agent cost refresh unavailable",
             extra={
@@ -172,11 +172,11 @@ async def run_agent_cost_refresh(
             "Agent cost refresh exhausted",
             extra={"usage_run_id": payload["invocation_id"], "usage_attempt": attempt},
         )
-        return {"status": "exhausted", "reason": "LangSmith cost unavailable"}
+        return {"status": "exhausted", "reason": "Langfuse cost unavailable"}
     scheduled = await schedule_agent_cost_refresh(state, attempt=next_attempt, client=client)
     return {
         "status": "retry_scheduled" if scheduled else "unavailable",
-        "reason": "LangSmith cost unavailable",
+        "reason": "Langfuse cost unavailable",
         "attempt": next_attempt,
     }
 

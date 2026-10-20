@@ -33,7 +33,7 @@ from openswe.source_context import SourceContext
 from openswe.threads.creation import create_thread
 from openswe.utils.dashboard_links import dashboard_thread_url
 from openswe.utils.json_types import thread_metadata
-from openswe.utils.langsmith import get_langsmith_trace_url
+from openswe.utils.langfuse import get_thread_trace_url
 from openswe.utils.thread_ops import langgraph_client
 from openswe.utils.thread_participants import participant_metadata
 from openswe.webhooks.common import SlackRepoResolution, is_repo_allowed
@@ -119,7 +119,7 @@ def _thread_details(instructions: str, repo: dict[str, str] | None) -> str:
 
 async def _run_links_section(thread_id: str) -> str:
     dashboard_url = dashboard_thread_url(thread_id)
-    trace_url = await get_langsmith_trace_url(thread_id)
+    trace_url = await get_thread_trace_url(thread_id, external=True)
     lines = ["## Open SWE Links"]
     if dashboard_url:
         lines.append(f"- Web: {dashboard_url}")

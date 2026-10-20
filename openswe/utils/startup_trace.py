@@ -15,9 +15,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from langchain_core.runnables.config import ensure_config
-from langsmith.run_helpers import get_current_run_tree
-from langsmith.run_trees import RunTree
+from langfuse import Langfuse
+
+from openswe.utils.langfuse import get_langfuse_client
 
 logger = logging.getLogger(__name__)
 
@@ -120,49 +120,22 @@ async def asubphase(name: str, **metadata: Any) -> AsyncIterator[None]:
         yield
 
 
-def _parent_run_tree() -> RunTree | None:
-    current = get_current_run_tree()
-    if current is not None:
-        return current
-    # LangChain's tracer does not publish a run tree, so the current span has to
-    # be recovered from the callback manager driving it.
-    callbacks = ensure_config().get("callbacks")
-    parent_run_id = getattr(callbacks, "parent_run_id", None)
-    if parent_run_id is None:
-        return None
-    for handler in getattr(callbacks, "handlers", []):
-        run_map = getattr(handler, "run_map", None)
-        run = run_map.get(str(parent_run_id)) if isinstance(run_map, dict) else None
-        if isinstance(run, RunTree) and run.dotted_order:
-            return run
-    return None
-
-
-def _emit(parent: RunTree, phase: _Phase, outputs: dict[str, Any] | None = None) -> RunTree:
-    # LangSmith clamps a child's start_time to its parent's, so a phase that ran
-    # before the parent span opened draws a shortened bar. The real numbers ride
-    # along on the span's inputs and outputs.
-    child = parent.create_child(
+def _emit(client: Langfuse, phase: _Phase) -> None:
+    inputs = {
+        "started_at": phase.start.isoformat(),
+        **({"ended_at": phase.end.isoformat()} if phase.end else {}),
+    }
+    output = {"elapsed_ms": phase.elapsed_ms} if phase.elapsed_ms is not None else {}
+    with client.start_as_current_observation(
         name=phase.name,
-        run_type="chain",
-        start_time=phase.start,
-        inputs={
-            "started_at": phase.start.isoformat(),
-            **({"ended_at": phase.end.isoformat()} if phase.end else {}),
-            **phase.metadata,
-        },
-    )
-    child.post()
-    child.end(
-        outputs={
-            **({"elapsed_ms": phase.elapsed_ms} if phase.elapsed_ms is not None else {}),
-            **(outputs or {}),
-        },
-        error=phase.error,
-        end_time=phase.end,
-    )
-    child.patch()
-    return child
+        as_type="span",
+        input=inputs,
+        metadata=phase.metadata,
+    ) as span:
+        if phase.error is None:
+            span.update(output=output)
+        else:
+            span.update(output=output, level="ERROR", status_message=phase.error)
 
 
 def flush_phases(thread_id: str | None) -> None:
@@ -176,37 +149,42 @@ def flush_phases(thread_id: str | None) -> None:
     if pending and thread_id:
         _PHASES.setdefault(thread_id, []).extend(pending)
     try:
-        parent = _parent_run_tree()
-        if parent is None:
-            logger.debug("No run tree to attach startup phases for thread %s", thread_id)
+        client = get_langfuse_client()
+        if client is None or not client.get_current_trace_id():
+            logger.debug("No active Langfuse trace for startup phases on thread %s", thread_id)
             return
         ordered = sorted(
             (entry for entry in phases if entry.end is not None), key=lambda item: item.start
         )
         if not ordered:
             return
+        ended_at = max(entry.end for entry in ordered if entry.end is not None)
         span = _Phase(
             name="startup",
             start=ordered[0].start,
             monotonic=0.0,
-            end=max(entry.end for entry in ordered if entry.end is not None),
+            end=ended_at,
         )
         span.elapsed_ms = int((span.end - span.start).total_seconds() * 1000) if span.end else None
-        wrapper = _emit(
-            parent,
-            span,
-            outputs={
-                "phases": [
-                    {
-                        "name": entry.name,
-                        "elapsed_ms": entry.elapsed_ms,
-                        "started_at": entry.start.isoformat(),
-                    }
-                    for entry in ordered
-                ]
-            },
-        )
-        for entry in ordered:
-            _emit(wrapper, entry)
+        with client.start_as_current_observation(
+            name="startup",
+            as_type="span",
+            input={"started_at": span.start.isoformat(), "ended_at": ended_at.isoformat()},
+        ) as wrapper:
+            wrapper.update(
+                output={
+                    "elapsed_ms": span.elapsed_ms,
+                    "phases": [
+                        {
+                            "name": entry.name,
+                            "elapsed_ms": entry.elapsed_ms,
+                            "started_at": entry.start.isoformat(),
+                        }
+                        for entry in ordered
+                    ],
+                }
+            )
+            for entry in ordered:
+                _emit(client, entry)
     except Exception:
         logger.debug("Could not replay startup phases for thread %s", thread_id, exc_info=True)

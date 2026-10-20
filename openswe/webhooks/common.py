@@ -147,7 +147,7 @@ from openswe.utils.dashboard_links import dashboard_thread_url  # noqa: F401
 from openswe.utils.http import DEFAULT_HTTP_TIMEOUT
 from openswe.utils.http_pool import pooled_transport
 from openswe.utils.json_types import JsonObject, ThreadLike, as_thread_dict, thread_metadata
-from openswe.utils.langsmith import create_langsmith_thread_feedback
+from openswe.utils.langfuse import create_thread_trace_score
 from openswe.utils.multimodal import (
     dedupe_urls,  # noqa: F401
     extract_image_urls,  # noqa: F401
@@ -1427,14 +1427,14 @@ async def _record_pr_merge_feedback(thread_id: str, *, pr_url: str) -> None:
     """
     source_info = {"source": "github_pr_merged", "thread_id": thread_id, "pr_url": pr_url}
     await asyncio.gather(
-        create_langsmith_thread_feedback(
+        create_thread_trace_score(
             thread_id,
             f"github_pr_merged:{pr_url}",
             score=1.0,
             comment=f"Agent-authored pull request merged: {pr_url}",
             source_info=source_info,
         ),
-        create_langsmith_thread_feedback(
+        create_thread_trace_score(
             thread_id,
             PR_MERGED_FEEDBACK_KEY,
             score=1.0,

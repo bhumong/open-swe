@@ -220,7 +220,7 @@ The cases cover typos, ambiguous names, quoted and forwarded requests, model men
 
 ### Routing through the LangSmith LLM Gateway
 
-Model calls can be proxied through the [LangSmith LLM Gateway](https://docs.langchain.com/langsmith/llm-gateway) (private beta) instead of hitting providers directly. The gateway authenticates with a **LangSmith API key** that has the `gateway:invoke` permission and resolves the real provider key from workspace Provider Secrets, so no provider API keys are needed at runtime — and it adds central spend limits, PII/secrets redaction, and tracing. Your org must have the gateway enabled with Provider Secrets configured.
+Model calls can be proxied through the [LangSmith LLM Gateway](https://docs.langchain.com/langsmith/llm-gateway) (private beta) instead of hitting providers directly. The gateway authenticates with a **LangSmith API key** that has the `gateway:invoke` permission and resolves the real provider key from workspace Provider Secrets, so no provider API keys are needed at runtime — and it adds central spend limits and PII/secrets redaction. Open SWE execution traces are exported to Langfuse independently of Gateway routing. Your org must have the gateway enabled with Provider Secrets configured.
 
 Routing is opt-in and off by default. Enable it either way:
 
@@ -307,8 +307,9 @@ Open SWE, then configure its `/mcp` URL with an `Authorization: Bearer YOUR_API_
 header. The Currents REST API URL itself does not speak MCP, and the local
 `npx @currents/mcp` command cannot be imported as a workspace connection.
 
-Optional reviewer trace resolution and personal LangSmith credential proxying
-have been removed. Configure agent access to LangSmith through Workspace MCPs.
+Open SWE execution tracing, trace-linked feedback, and reviewer evaluations use
+Langfuse. Personal LangSmith trace resolution and credential proxying have been
+removed. Configure other agent access to LangSmith through Workspace MCPs.
 Sandbox provisioning uses the deployment's `LANGSMITH_API_KEY` and
 `LANGSMITH_ENDPOINT`. Linear webhook intake uses the signed webhook setup;
 configure Linear replies and other agent operations through Workspace MCPs.

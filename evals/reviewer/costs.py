@@ -1,50 +1,33 @@
-"""Per-PR and per-run LLM cost for a reviewer eval experiment.
+"""Per-PR and per-run LLM cost for a Langfuse reviewer experiment."""
 
-The reviewer runs inside the LangGraph server, which traces into its own
-LangSmith project, so the experiment's target runs carry no cost. Each target
-output names its reviewer thread; this reads that thread's cost from the
-server's project, records it as ``cost_usd`` / ``total_tokens`` feedback on the
-experiment run, and writes run totals into the experiment metadata.
-
-``run_eval`` calls this when an experiment finishes. Re-run it by hand if
-LangSmith was still ingesting traces (re-running overwrites earlier values):
-
-    uv run python -m evals.reviewer.costs --experiment <experiment-name> \\
-        --reviewer-project open-swe-local
-"""
-
-import argparse
 import asyncio
 import logging
-import os
 import statistics
-import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import cast
 
-from dotenv import load_dotenv
-from langsmith import AsyncClient, Client
-from langsmith.schemas import Run
-from langsmith.utils import LangSmithConflictError
+from langfuse import Evaluation
+from langfuse.experiment import ExperimentItemResult
+
+from openswe.utils.langfuse import LangfuseCostUnavailable, LangfuseThreadCost, get_trace_cost
 
 logger = logging.getLogger(__name__)
 
-# LangSmith prices a trace shortly after the server flushes it.
 _RETRY_DELAYS_SECONDS = (15, 45, 90)
-_MAX_CONCURRENT_LOOKUPS = 8
 
 
 @dataclass(frozen=True)
 class PrCost:
-    run_id: uuid.UUID
+    run_id: str
     pr_url: str
     thread_id: str
     cost_usd: float
-    total_tokens: int
+    total_tokens: int | None
 
 
 @dataclass(frozen=True)
 class CostSummary:
-    experiment: str
     priced: list[PrCost]
     unpriced: list[str]
 
@@ -66,113 +49,169 @@ class CostSummary:
 
     @property
     def total_tokens(self) -> int:
-        return sum(item.total_tokens for item in self.priced)
+        return sum(item.total_tokens or 0 for item in self.priced)
+
+
+def _field(value: object | None, key: str) -> object | None:
+    if isinstance(value, Mapping):
+        return cast(object | None, value.get(key))
+    return cast(object | None, getattr(value, key, None))
 
 
 async def _thread_cost(
-    client: AsyncClient, project_id: str, thread_id: str
-) -> tuple[float, int] | None:
+    thread_id: str, invocation_id: str, lookup_start: str | None
+) -> LangfuseThreadCost | None:
     for delay in (0, *_RETRY_DELAYS_SECONDS):
         if delay:
             await asyncio.sleep(delay)
-        stats = await client.threads.stats(
-            thread_id, session_id=project_id, selects=["TOTAL_COST", "TOTAL_TOKENS"]
-        )
-        if stats.total_cost is not None and float(stats.total_cost) > 0:
-            return float(stats.total_cost), int(stats.total_tokens or 0)
-    logger.warning("Reviewer thread has no priced traces", extra={"thread_id": thread_id})
+        try:
+            snapshot = await get_trace_cost(
+                thread_id,
+                invocation_id,
+                run_only=True,
+                **({"lookup_start": lookup_start} if lookup_start else {}),
+            )
+        except LangfuseCostUnavailable:
+            logger.info("Langfuse cost is unavailable for reviewer thread %s", thread_id)
+            return None
+        except Exception:  # noqa: BLE001 — pricing must not stop evaluation progress
+            logger.warning(
+                "Could not read reviewer trace cost",
+                extra={"reviewer_thread_id": thread_id},
+                exc_info=True,
+            )
+            continue
+        if snapshot is not None:
+            return snapshot
+    logger.warning("Reviewer thread has no priced trace", extra={"thread_id": thread_id})
     return None
 
 
-def _write_feedback(
-    client: Client,
-    experiment_id: uuid.UUID,
-    run_id: uuid.UUID,
-    key: str,
-    *,
-    score: float | None = None,
-    value: int | None = None,
-) -> None:
-    feedback_id = uuid.uuid5(run_id, key)
-    try:
-        client.create_feedback(
-            run_id,
-            key,
-            score=score,
-            value=value,
-            feedback_id=feedback_id,
-            session_id=experiment_id,
+async def evaluate_pr_cost(*, output: object, **_: object) -> list[Evaluation]:
+    """Return cost/token scores when the target's Langfuse trace is fully priced."""
+    thread_id = _field(output, "thread_id")
+    invocation_id = _field(output, "invocation_id")
+    pr_url = _field(output, "pr_url")
+    if not isinstance(thread_id, str) or not thread_id or not isinstance(invocation_id, str):
+        logger.warning("Reviewer output is missing trace correlation", extra={"pr_url": pr_url})
+        return [
+            Evaluation(
+                name="cost_status",
+                value="unpriced",
+                data_type="CATEGORICAL",
+                comment="The reviewer output has no thread and invocation id.",
+            )
+        ]
+    started_at = _field(output, "invocation_started_at")
+    snapshot = await _thread_cost(
+        thread_id,
+        invocation_id,
+        started_at if isinstance(started_at, str) else None,
+    )
+    if snapshot is None:
+        return [
+            Evaluation(
+                name="cost_status",
+                value="unpriced",
+                data_type="CATEGORICAL",
+                comment="Langfuse has not returned a complete cost for this reviewer trace.",
+            )
+        ]
+    evaluations = [
+        Evaluation(name="cost_status", value="priced", data_type="CATEGORICAL"),
+        Evaluation(name="cost_usd", value=snapshot.total_cost, data_type="NUMERIC"),
+    ]
+    if snapshot.total_tokens is not None:
+        evaluations.append(
+            Evaluation(name="total_tokens", value=snapshot.total_tokens, data_type="NUMERIC")
         )
-    except LangSmithConflictError:
-        client.update_feedback(feedback_id, score=score, value=value)
+    return evaluations
 
 
-async def record_experiment_costs(experiment: str, reviewer_project: str) -> CostSummary:
-    """Price every example of ``experiment`` from ``reviewer_project`` traces."""
-    client = Client()
-    async_client = AsyncClient()
-    reviewer_project_id = str(
-        (await asyncio.to_thread(client.read_project, project_name=reviewer_project)).id
-    )
-    experiment_project = await asyncio.to_thread(client.read_project, project_name=experiment)
-    runs: list[Run] = await asyncio.to_thread(
-        lambda: list(client.list_runs(project_id=experiment_project.id, is_root=True))
-    )
-    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_LOOKUPS)
+def _evaluations(result: object) -> dict[str, object | None]:
+    values: dict[str, object | None] = {}
+    evaluations = _field(result, "evaluations")
+    if not isinstance(evaluations, Sequence) or isinstance(evaluations, str | bytes):
+        return values
+    for evaluation in evaluations:
+        name = _field(evaluation, "name")
+        if isinstance(name, str):
+            values[name] = _field(evaluation, "value")
+    return values
 
-    async def _price(run: Run) -> PrCost | str:
-        outputs = run.outputs or {}
-        pr_url = str(outputs.get("pr_url") or run.id)
-        thread_id = outputs.get("thread_id")
-        if not isinstance(thread_id, str):
-            return pr_url
-        async with semaphore:
-            priced = await _thread_cost(async_client, reviewer_project_id, thread_id)
-        if priced is None:
-            return pr_url
-        cost_usd, total_tokens = priced
-        await asyncio.to_thread(
-            _write_feedback, client, experiment_project.id, run.id, "cost_usd", score=cost_usd
+
+def summarize_experiment_costs(item_results: Sequence[object]) -> CostSummary:
+    """Summarize already-recorded evaluator scores without issuing more API calls."""
+    priced: list[PrCost] = []
+    unpriced: list[str] = []
+    for result in item_results:
+        output = _field(result, "output")
+        item = _field(result, "item")
+        raw_inputs = _field(item, "input")
+        inputs: Mapping[str, object] = (
+            cast(Mapping[str, object], raw_inputs) if isinstance(raw_inputs, Mapping) else {}
         )
-        # LangSmith caps feedback scores below 100k, which one review's tokens exceed.
-        await asyncio.to_thread(
-            _write_feedback,
-            client,
-            experiment_project.id,
-            run.id,
-            "total_tokens",
-            value=total_tokens,
+        scores = _evaluations(result)
+        pr_url_value = inputs.get("pr_url") or _field(output, "pr_url")
+        pr_url = str(pr_url_value or "unknown")
+        cost_value = scores.get("cost_usd")
+        if scores.get("cost_status") != "priced" or not isinstance(cost_value, (float, int)):
+            unpriced.append(pr_url)
+            continue
+        thread_id = _field(output, "thread_id")
+        invocation_id = _field(output, "invocation_id")
+        cost = float(cost_value)
+        if isinstance(cost_value, bool) or not math_is_finite_nonnegative(cost):
+            unpriced.append(pr_url)
+            continue
+        total_tokens_value = scores.get("total_tokens")
+        priced.append(
+            PrCost(
+                run_id=str(invocation_id or ""),
+                pr_url=pr_url,
+                thread_id=str(thread_id or ""),
+                cost_usd=cost,
+                total_tokens=(
+                    int(total_tokens_value)
+                    if isinstance(total_tokens_value, int)
+                    and not isinstance(total_tokens_value, bool)
+                    else None
+                ),
+            )
         )
-        return PrCost(run.id, pr_url, thread_id, cost_usd, total_tokens)
+    return CostSummary(priced=priced, unpriced=unpriced)
 
-    results = await asyncio.gather(*(_price(run) for run in runs))
-    summary = CostSummary(
-        experiment=experiment,
-        priced=[item for item in results if isinstance(item, PrCost)],
-        unpriced=[item for item in results if isinstance(item, str)],
-    )
-    await asyncio.to_thread(
-        client.update_project,
-        experiment_project.id,
-        metadata={
-            **(experiment_project.metadata or {}),
-            "cost_total_usd": round(summary.total_usd, 4),
-            "cost_mean_per_pr_usd": round(summary.mean_usd, 4),
-            "cost_median_per_pr_usd": round(summary.median_usd, 4),
-            "cost_max_per_pr_usd": round(summary.max_usd, 4),
-            "cost_total_tokens": summary.total_tokens,
-            "cost_priced_prs": len(summary.priced),
-            "cost_unpriced_prs": len(summary.unpriced),
-            "reviewer_langsmith_project": reviewer_project,
-        },
-    )
-    return summary
+
+def math_is_finite_nonnegative(value: float) -> bool:
+    return value >= 0 and value != float("inf") and value == value
+
+
+def record_experiment_costs(
+    *, item_results: Sequence[ExperimentItemResult], **_: object
+) -> list[Evaluation]:
+    """Attach aggregate cost scores to the Langfuse dataset run."""
+    summary = summarize_experiment_costs(item_results)
+    return [
+        Evaluation(name="cost_total_usd", value=summary.total_usd, data_type="NUMERIC"),
+        Evaluation(name="cost_mean_per_pr_usd", value=summary.mean_usd, data_type="NUMERIC"),
+        Evaluation(name="cost_median_per_pr_usd", value=summary.median_usd, data_type="NUMERIC"),
+        Evaluation(name="cost_max_per_pr_usd", value=summary.max_usd, data_type="NUMERIC"),
+        Evaluation(name="cost_total_tokens", value=summary.total_tokens, data_type="NUMERIC"),
+        Evaluation(name="cost_priced_prs", value=len(summary.priced), data_type="NUMERIC"),
+        Evaluation(
+            name="cost_unpriced_prs",
+            value=len(summary.unpriced),
+            data_type="NUMERIC",
+            comment=", ".join(summary.unpriced) or None,
+        ),
+    ]
 
 
 def print_summary(summary: CostSummary) -> None:
-    print(f"\nCost for {summary.experiment}")
+    print("\nReviewer evaluation cost")
     for item in sorted(summary.priced, key=lambda item: item.cost_usd, reverse=True):
-        print(f"  ${item.cost_usd:8.4f}  {item.total_tokens:>10,} tok  {item.pr_url}")
+        tokens = f"{item.total_tokens:,} tok" if item.total_tokens is not None else "tokens n/a"
+        print(f"  ${item.cost_usd:8.4f}  {tokens:>14}  {item.pr_url}")
     for pr_url in summary.unpriced:
         print(f"  {'unpriced':>9}  {'':>14}  {pr_url}")
     print(
@@ -180,23 +219,3 @@ def print_summary(summary: CostSummary) -> None:
         f"mean ${summary.mean_usd:.4f} | median ${summary.median_usd:.4f} | "
         f"max ${summary.max_usd:.4f} | {summary.total_tokens:,} tokens"
     )
-
-
-async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
-    load_dotenv()
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--experiment", required=True, help="LangSmith experiment name.")
-    ap.add_argument(
-        "--reviewer-project",
-        default=os.environ.get("LANGSMITH_PROJECT"),
-        help="LangSmith project the reviewer server traces into (default: $LANGSMITH_PROJECT).",
-    )
-    args = ap.parse_args()
-    if not args.reviewer_project:
-        ap.error("--reviewer-project is required when LANGSMITH_PROJECT is unset")
-    print_summary(await record_experiment_costs(args.experiment, args.reviewer_project))
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

@@ -1,12 +1,8 @@
-"""Persist reviewer finding outcomes to a LangSmith dataset.
+"""Persist reviewer finding outcomes to a Langfuse dataset.
 
-Every time a published finding is resolved (a later commit fixed it),
-dismissed (false positive / human pushback), or gets a 👍/👎 reaction, we
-upsert one labelled example into a single LangSmith dataset.
-
-Writes are best-effort and deterministic (one example id per
-``finding_id`` + ``label_source``) so re-processing the same transition
-updates in place instead of duplicating.
+Writes are best-effort and deterministic (one item id per
+``finding_id`` + ``label_source``) so re-processing a transition updates the
+same item instead of creating duplicates.
 """
 
 import asyncio
@@ -14,23 +10,21 @@ import logging
 import uuid
 from typing import Any
 
-from langsmith import AsyncClient as AsyncLangSmithClient
-from langsmith.utils import LangSmithNotFoundError
+from langfuse import Langfuse
+from langfuse.api import NotFoundError
 
 from openswe.config import ENV
 from openswe.review.findings import Finding
 from openswe.run_config import RunConfig
-from openswe.utils import ttl_cache
-from openswe.utils.langsmith import async_langsmith_client, sync_langsmith_client
+from openswe.utils.langfuse import get_langfuse_client
+from openswe.utils.typed_json import JsonObject
 
 logger = logging.getLogger(__name__)
 
-OUTCOMES_DATASET_NAME = ENV.REVIEWER_OUTCOMES_DATASET.get()
-_DATASET_ID_TTL_SECONDS = 3600
-
+OUTCOMES_DATASET_NAME = ENV.LANGFUSE_REVIEWER_OUTCOMES_DATASET.get()
+_DEFAULT_OUTCOMES_DATASET_NAME = "openswe-reviewer-outcomes"
 TRUE_POSITIVE = "true_positive"
 FALSE_POSITIVE = "false_positive"
-
 _DIFF_HUNK_MAX_CHARS = 4000
 
 
@@ -40,12 +34,7 @@ def outcome_from_status(
     first_seen_sha: str | None,
     head_sha: str | None,
 ) -> tuple[str, str] | None:
-    """Map a finding status transition to ``(label, label_source)``.
-
-    ``resolved`` is a positive signal: we flagged something and it was closed.
-    When a commit landed between first sighting and resolution we tag it
-    ``resolved_by_commit`` (a fix shipped); otherwise ``resolved_same_sha``.
-    """
+    """Map a finding status transition to ``(label, label_source)``."""
     if status == "resolved":
         if head_sha and first_seen_sha and head_sha != first_seen_sha:
             return TRUE_POSITIVE, "resolved_by_commit"
@@ -64,37 +53,25 @@ def outcome_from_score(score: float | None, *, source: str) -> tuple[str, str] |
     return FALSE_POSITIVE, f"{source}_thumbs_down"
 
 
-def _outcomes_credentials() -> tuple[str, str] | None:
-    """Resolve the outcomes-dataset credentials, preferring the prod tenant."""
-    api_key = ENV.LANGSMITH_API_KEY.optional()
-    if not api_key:
-        return None
-    return api_key, ENV.LANGSMITH_ENDPOINT.get()
-
-
-async def _ensure_dataset(client: AsyncLangSmithClient) -> uuid.UUID:
-    try:
-        return (await client.read_dataset(dataset_name=OUTCOMES_DATASET_NAME)).id
-    except LangSmithNotFoundError:
-        ds = await client.create_dataset(
-            dataset_name=OUTCOMES_DATASET_NAME,
-            description=(
-                "Open SWE reviewer finding outcomes (resolved / dismissed / 👍👎) "
-                "captured in production."
-            ),
-        )
-        return ds.id
-
-
-async def _dataset_id(client: AsyncLangSmithClient) -> uuid.UUID:
-    """The outcomes dataset's id, looked up by exact name once per process."""
-    return await ttl_cache.cached(
-        "reviewer:outcomes-dataset-id", _DATASET_ID_TTL_SECONDS, lambda: _ensure_dataset(client)
+def _example_id(repo: str, finding_id: str, label_source: str) -> uuid.UUID:
+    dataset_scope = (
+        ""
+        if OUTCOMES_DATASET_NAME == _DEFAULT_OUTCOMES_DATASET_NAME
+        else f"{OUTCOMES_DATASET_NAME}:"
+    )
+    return uuid.uuid5(
+        uuid.NAMESPACE_URL,
+        f"{dataset_scope}finding-outcome:{repo}:{finding_id}:{label_source}",
     )
 
 
-def _example_id(repo: str, finding_id: str, label_source: str) -> uuid.UUID:
-    return uuid.uuid5(uuid.NAMESPACE_URL, f"finding-outcome:{repo}:{finding_id}:{label_source}")
+def _run_example_id(run_id: str, label_source: str) -> uuid.UUID:
+    dataset_scope = (
+        ""
+        if OUTCOMES_DATASET_NAME == _DEFAULT_OUTCOMES_DATASET_NAME
+        else f"{OUTCOMES_DATASET_NAME}:"
+    )
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"{dataset_scope}run-outcome:{run_id}:{label_source}")
 
 
 def _truncate(value: Any, limit: int) -> Any:
@@ -103,34 +80,39 @@ def _truncate(value: Any, limit: int) -> Any:
     return value
 
 
-async def _create_or_update_example(
-    client: AsyncLangSmithClient,
-    credentials: tuple[str, str],
-    *,
-    dataset_id: uuid.UUID,
-    example_id: uuid.UUID,
-    inputs: dict[str, Any],
-    outputs: dict[str, Any],
-    metadata: dict[str, Any],
-) -> None:
+def _ensure_dataset(client: Langfuse) -> None:
     try:
-        await client.create_example(
-            inputs=inputs,
-            outputs=outputs,
-            metadata=metadata,
-            dataset_id=dataset_id,
-            example_id=example_id,
-        )
-    except Exception:  # noqa: BLE001 — example already exists; update in place
-        # AsyncClient exposes no update_example; the sync one runs off-loop.
-        sync_client = sync_langsmith_client(*credentials)
-        await asyncio.to_thread(
-            sync_client.update_example,
-            example_id=example_id,
-            inputs=inputs,
-            outputs=outputs,
-            metadata=metadata,
-        )
+        client.api.datasets.get(dataset_name=OUTCOMES_DATASET_NAME)
+    except NotFoundError:
+        try:
+            client.create_dataset(
+                name=OUTCOMES_DATASET_NAME,
+                description=(
+                    "Open SWE reviewer finding outcomes (resolved / dismissed / 👍👎) "
+                    "captured in production."
+                ),
+            )
+        except Exception:
+            # Another process may have created it after our lookup.
+            client.api.datasets.get(dataset_name=OUTCOMES_DATASET_NAME)
+
+
+def _upsert_item(
+    client: Langfuse,
+    *,
+    item_id: uuid.UUID,
+    inputs: JsonObject,
+    outputs: JsonObject,
+    metadata: JsonObject,
+) -> None:
+    _ensure_dataset(client)
+    client.create_dataset_item(
+        dataset_name=OUTCOMES_DATASET_NAME,
+        id=str(item_id),
+        input=inputs,
+        expected_output=outputs,
+        metadata=metadata,
+    )
 
 
 async def upsert_finding_outcome(
@@ -150,12 +132,12 @@ async def upsert_finding_outcome(
     finding_id = str(finding.get("id") or "")
     if not finding_id or not repo:
         return False
-    credentials = _outcomes_credentials()
-    if credentials is None:
-        logger.debug("No LangSmith client configured; skipping outcome example")
+    client = get_langfuse_client()
+    if client is None:
+        logger.debug("No Langfuse client configured; skipping reviewer outcome")
         return False
     try:
-        inputs = {
+        inputs: JsonObject = {
             "repo": repo,
             "pr_number": pr_number,
             "pr_url": pr_url,
@@ -167,7 +149,7 @@ async def upsert_finding_outcome(
             "base_sha": base_sha,
             "head_sha": head_sha,
         }
-        outputs = {
+        outputs: JsonObject = {
             "label": label,
             "label_source": label_source,
             "finding": {
@@ -179,7 +161,7 @@ async def upsert_finding_outcome(
             },
             "resolution_note": finding.get("resolution_note"),
         }
-        metadata = {
+        metadata: JsonObject = {
             "granularity": "finding",
             "repo": repo,
             "finding_id": finding_id,
@@ -189,12 +171,10 @@ async def upsert_finding_outcome(
             "thread_id": thread_id,
             "first_seen_sha": finding.get("first_seen_sha"),
         }
-        client = async_langsmith_client(*credentials)
-        await _create_or_update_example(
+        await asyncio.to_thread(
+            _upsert_item,
             client,
-            credentials,
-            dataset_id=await _dataset_id(client),
-            example_id=_example_id(repo, finding_id, label_source),
+            item_id=_example_id(repo, finding_id, label_source),
             inputs=inputs,
             outputs=outputs,
             metadata=metadata,
@@ -211,33 +191,28 @@ async def upsert_run_outcome(
     label_source: str,
     run_id: str,
     repo: str | None = None,
-    extra: dict[str, Any] | None = None,
+    extra: JsonObject | None = None,
 ) -> bool:
-    """Upsert a coarse run-level outcome (e.g. a Slack 👍/👎 on a review).
-
-    These have no finding/diff anchor, so they are tagged ``granularity="run"``.
-    """
+    """Upsert a coarse run-level outcome such as a Slack 👍/👎 rating."""
     if not run_id:
         return False
-    credentials = _outcomes_credentials()
-    if credentials is None:
+    client = get_langfuse_client()
+    if client is None:
         return False
     try:
-        inputs = {"repo": repo, "run_id": run_id, **(extra or {})}
-        outputs = {"label": label, "label_source": label_source}
-        metadata = {
+        inputs: JsonObject = {"repo": repo, "run_id": run_id, **(extra or {})}
+        outputs: JsonObject = {"label": label, "label_source": label_source}
+        metadata: JsonObject = {
             "granularity": "run",
             "repo": repo,
             "run_id": run_id,
             "label": label,
             "label_source": label_source,
         }
-        client = async_langsmith_client(*credentials)
-        await _create_or_update_example(
+        await asyncio.to_thread(
+            _upsert_item,
             client,
-            credentials,
-            dataset_id=await _dataset_id(client),
-            example_id=uuid.uuid5(uuid.NAMESPACE_URL, f"run-outcome:{run_id}:{label_source}"),
+            item_id=_run_example_id(run_id, label_source),
             inputs=inputs,
             outputs=outputs,
             metadata=metadata,
@@ -255,18 +230,12 @@ async def emit_finding_status_outcome(
     cfg: RunConfig,
     thread_id: str | None = None,
 ) -> bool:
-    """Map a resolve/dismiss transition to an outcome example and upsert it.
-
-    Reads repo / PR / SHA context from the reviewer run config.
-    Best-effort: a no-op when the status isn't terminal or repo is unknown.
-    """
+    """Map a resolve/dismiss transition and upsert its outcome example."""
     head_sha = cfg.head_sha or ""
     mapping = outcome_from_status(
         status, first_seen_sha=finding.get("first_seen_sha"), head_sha=head_sha
     )
-    if mapping is None:
-        return False
-    if not cfg.repo_full_name:
+    if mapping is None or not cfg.repo_full_name:
         return False
     label, label_source = mapping
     return await upsert_finding_outcome(

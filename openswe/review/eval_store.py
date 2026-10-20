@@ -13,7 +13,7 @@ REVIEWER_EVAL_KEY = "reviewer"
 DEFAULT_EVAL_PROJECT = "open-swe-evals"
 
 LOG_TAIL_CHARS = 12000
-EXPERIMENT_URL_RE = re.compile(r"https://\S*smith\.langchain\.com/\S+")
+EXPERIMENT_URL_RE = re.compile(r"https?://[^\s]+/project/[^/\s]+/datasets/[^/\s]+/runs/[^\s]+")
 
 # The running eval refreshes the heartbeat this often; a record is only
 # reconciled as failed once its heartbeat is older than the stale threshold, so

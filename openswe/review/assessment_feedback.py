@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from openswe.dashboard.repo_access import require_repo_access_for_user
 from openswe.review.publish import ReviewAssessment
 from openswe.store import TypedStore, now_iso
-from openswe.utils.langsmith import create_langsmith_feedback
+from openswe.utils.langfuse import create_trace_score
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ async def save_feedback(
     await feedback_store(review_id).put(feedback.login, feedback)
     if assessment.run_id:
         try:
-            saved = await create_langsmith_feedback(
+            saved = await create_trace_score(
                 assessment.run_id,
                 f"review_assessment:{review_id}:{feedback.login}",
                 score=1.0 if feedback.rating == "helpful" else 0.0,

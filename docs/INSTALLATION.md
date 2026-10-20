@@ -20,7 +20,8 @@ What a deployment needs:
 
 | Value | How you get it |
 |---|---|
-| `LANGSMITH_API_KEY` | LangSmith → Settings → API Keys. LangGraph Platform injects it. |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL` | Langfuse project API keys and the Langfuse host; Open SWE tracing and reviewer evaluations use Langfuse. |
+| `LANGSMITH_API_KEY` | LangSmith → Settings → API Keys. Used by retained sandbox, Gateway, and Managed Tools features, not Open SWE tracing. LangGraph Platform may inject it. |
 | A model provider key such as `ANTHROPIC_API_KEY`, or `LANGSMITH_GATEWAY_API_KEY` for the LangSmith LLM Gateway | Your provider, or a LangSmith key with `gateway:invoke` (step 4) |
 | `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID`, `GITHUB_APP_CLIENT_SECRET`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_INSTALLATION_ID` | The GitHub App you create in step 3 |
 | `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_ID`, `SLACK_BOT_USER_ID`, `SLACK_BOT_USERNAME` | The Slack app you create in step 5 |
@@ -43,7 +44,7 @@ Every newly persisted GitHub, Slack, and Linear event-log delivery also sends `W
 
 You need the deployment's public URL before the GitHub App can be created, so create the deployment first. Its initial revision may remain stopped until step 6, when you configure the GitHub and Slack variables plus a required login allowlist.
 
-**LangGraph Platform.** Connect the repository to a new deployment in LangSmith → Deployments. The image build bundles the dashboard (the `dockerfile_lines` in `langgraph.json`), so the deployment URL serves the UI at `/` and the API beneath it; a failed UI build is logged and the backend still deploys. The platform injects `LANGSMITH_API_KEY`, `LANGSMITH_TRACING`, and `LANGSMITH_PROJECT`. You will set the environment variables in step 6.
+**LangGraph Platform.** Connect the repository to a new deployment in LangSmith → Deployments. The image build bundles the dashboard (the `dockerfile_lines` in `langgraph.json`), so the deployment URL serves the UI at `/` and the API beneath it; a failed UI build is logged and the backend still deploys. The platform may inject LangSmith settings; set `LANGSMITH_TRACING=false` and configure Langfuse in step 6 so Open SWE traces and reviewer evaluations go to Langfuse.
 
 **Standalone Docker.** The root `Dockerfile` builds a production LangGraph API server image (not the sandbox image):
 
@@ -77,11 +78,11 @@ After deployment, look for `Analytics database initialized` in startup logs. A s
 
 `collection_started_at` is set when the first event is successfully captured, not at startup. Reports read event-derived SQL tables and include `last_processed_at` plus indicators for queued or failed deliveries. Collection start and processing progress do not guarantee complete coverage: events can arrive late, and sources that have not been connected to analytics are absent. The Usage leaderboard, reviewer statistics, and PR outcomes all read these PostgreSQL projections. There is no analytics Store fallback or historical import. `reporting_cutover_at` is persisted once when the complete reporting integration first starts, and survives restarts. Reports exclude activity before this date; “All time” means since this cutover. The Usage page displays the date explicitly. Collection can begin earlier while the stack is rolling out, so `collection_started_at` and the reporting cutover describe different milestones.
 
-## 2. LangSmith API key
+## 2. LangSmith API key for retained runtime features
 
-Create a [LangSmith](https://smith.langchain.com/) API key under **Settings → API Keys** and save it as `LANGSMITH_API_KEY`. LangGraph Platform injects it into the deployment for you, along with `LANGSMITH_TRACING` and `LANGSMITH_PROJECT`; standalone deployments set it themselves.
+Create a [LangSmith](https://smith.langchain.com/) API key under **Settings → API Keys** and save it as `LANGSMITH_API_KEY`. LangGraph Platform may inject it into the deployment; standalone deployments set it themselves. Open SWE no longer uses this key for execution traces, trace links, feedback scores, or reviewer evaluations.
 
-The same key is used for tracing, sandboxes, and trace links. Trace links find your workspace through the key and the project by name, so no tenant or project ids are needed (`LANGSMITH_TENANT_ID` remains an override). Sandboxes boot from LangSmith's root snapshot, which ships `git`, `gh`, Python, `uv`, and Node, so there is nothing to configure; when your repositories need more, admins capture a sandbox image for a workspace from the **Workspaces** page later (see step 6). Other sandbox providers are covered in [CUSTOMIZATION.md](CUSTOMIZATION.md).
+The key remains available to retained LangSmith features, including the optional sandbox provider, LLM Gateway, and Managed Tools integrations. Open SWE sends execution traces and reviewer evaluation data to Langfuse; configure its project keys and base URL in step 6. Sandboxes boot from LangSmith's root snapshot, which ships `git`, `gh`, Python, `uv`, and Node, so there is nothing to configure; when your repositories need more, admins capture a sandbox image for a workspace from the **Workspaces** page later (see step 6). Other sandbox providers are covered in [CUSTOMIZATION.md](CUSTOMIZATION.md).
 
 ## 3. Create a GitHub App
 
@@ -102,7 +103,7 @@ Go to **GitHub Settings → Developer settings → [GitHub Apps](https://github.
   - Actions: Read-only — optional for CI diagnostics and log access. Grant **Read & write** only to enable `/baby-sit` to rerun evidence-backed flaky GitHub Actions jobs; existing installations must approve the elevation, and the token could then also cancel or delete runs.
   - Workflows: Read & write — lets Open SWE push branches containing explicitly requested GitHub Actions workflow changes.
   - Metadata: Read-only
-- **Organization permissions**: Members: Read-only — verifies org membership for dashboard login and LangSmith trace-tool access when `ALLOWED_GITHUB_ORGS` is set. Without it that check fails closed.
+- **Organization permissions**: Members: Read-only — verifies org membership for dashboard login when `ALLOWED_GITHUB_ORGS` is set. Without it that check fails closed.
 - **Subscribe to events**: Issue comment, Pull request review, Pull request review comment, Check run, Check suite, Workflow run (the last three give `/baby-sit` immediate failure detection), and Status (optional; legacy commit-status integrations).
 
 Click **Create GitHub App**, then collect from its settings page:
@@ -133,7 +134,7 @@ Open SWE calls models through [LangChain](https://python.langchain.com/) chat mo
 
 **Which model runs.** The deployment default comes from the supported-model list in `openswe/dashboard/options.py` (an Anthropic model when only an Anthropic key is configured, otherwise an OpenAI one); override it with `LLM_MODEL_ID` (`provider:model`) and `LLM_REASONING_EFFORT` (`low`, `medium`, `high`, `max`), and name a `LLM_FALLBACK_MODEL_ID` for when the primary provider fails. Admins set the instance default, which each workspace can override, under **Admin → Defaults**, and each user can pick their own model and effort under **Settings → Agent**. Model ids and their providers are described in [CUSTOMIZATION.md](CUSTOMIZATION.md).
 
-**Other API keys.** `EXA_API_KEY` (from [dashboard.exa.ai](https://dashboard.exa.ai)) enables the web search tool. `REVIEWER_OUTCOMES_DATASET` names the LangSmith dataset the reviewer records finding outcomes in (default `openswe-reviewer-outcomes`).
+**Other API keys.** `EXA_API_KEY` (from [dashboard.exa.ai](https://dashboard.exa.ai)) enables the web search tool. `LANGFUSE_REVIEWER_OUTCOMES_DATASET` names the Langfuse dataset the reviewer records finding outcomes in (default `openswe-reviewer-outcomes`).
 
 ## 5. Create the Slack app
 
@@ -249,7 +250,13 @@ Slack verifies the events Request URL the first time it can reach it; if the bac
 ```bash
 LANGGRAPH_URL="<URL>"                 # the deployment's own URL
 LANGSMITH_API_KEY=""                  # step 2; injected by LangGraph Platform
-LANGSMITH_TRACING="true"              # injected by LangGraph Platform
+LANGSMITH_TRACING="false"             # overrides platform tracing defaults; Open SWE traces go to Langfuse
+LANGCHAIN_TRACING_V2="false"           # disables the legacy LangSmith tracing switch
+LANGFUSE_PUBLIC_KEY=""                 # Langfuse project public key
+LANGFUSE_SECRET_KEY=""                 # Langfuse project secret key
+LANGFUSE_BASE_URL="https://cloud.langfuse.com"  # or your self-hosted Langfuse URL
+LANGFUSE_TRACING_ENVIRONMENT="production"
+LANGFUSE_PROJECT_NAME="Open SWE"
 ANTHROPIC_API_KEY=""                  # step 4: any provider key, or LANGSMITH_GATEWAY_API_KEY
 
 GITHUB_APP_ID=""                      # step 3
@@ -279,7 +286,7 @@ On LangGraph Platform, set them under the deployment's environment variables; sa
 
 **Slack.** Invite the bot to a channel and mention it: `@Open SWE what's in the repo?`. It replies in a thread. Public runs use the workspace GitHub App for agent operations, and user-owned PRs are opened as the thread's initiating GitHub user. Link the Slack user to a GitHub login before starting the thread, either by signing in to the dashboard once or through [Sign in with Slack](#slack-sign-in-and-code-channels).
 
-**GitHub.** GitHub-triggered conversations are public. Agent GitHub operations use the App installation identity, while PRs use the initiating commenter's OAuth. The commenter must have a linked account; an unmapped commenter is skipped with a warning in the server log. Comment `@openswe what files are in this repo?` on an issue in a repository where the App is installed. Within a few seconds you should see a 👀 reaction, a run in your LangSmith project, and a reply comment. GitHub lists every delivery and its response under the App's **Advanced** tab.
+**GitHub.** GitHub-triggered conversations are public. Agent GitHub operations use the App installation identity, while PRs use the initiating commenter's OAuth. The commenter must have a linked account; an unmapped commenter is skipped with a warning in the server log. Comment `@openswe what files are in this repo?` on an issue in a repository where the App is installed. Within a few seconds you should see a 👀 reaction, a run in your Langfuse project, and a reply comment. GitHub lists every delivery and its response under the App's **Advanced** tab.
 
 **How a run picks its workspace.** A workspace owns repositories, Slack channels, MCP connections, and workspace settings, and carries the sandbox prompt/snapshot/scripts described above. New work is routed to a workspace in this order, first match wins: the thread it belongs to already has one; the message that opened the thread starts with `/workspace:<slug>` (`workspace:<slug>` and `env:<slug>` anywhere in the message still work); the repository belongs to a workspace; the Slack channel it was posted in is bound to a workspace; the user has a default workspace set under **Settings → General**; otherwise it falls back to `default`. GitHub events for a repository that no workspace owns follow `OPEN_SWE_UNASSIGNED_REPO_WORKSPACE`: `default` (the default) routes them to the `default` workspace, and `ignore` drops them without creating a run. Workspace records and their repository and Slack-channel bindings live in PostgreSQL (see **Analytics storage** above), not the LangGraph Store; a workspace's MCP connections and workspace settings do stay in the Store, keyed by the workspace's slug.
 
@@ -417,7 +424,7 @@ PUBLIC_REPO_ORG_GATE=""   # single org whose members may trigger runs on *public
 OPEN_SWE_UNASSIGNED_REPO_WORKSPACE="default"   # GitHub events for a repo no workspace owns: "default" (the default) routes to the default workspace, "ignore" drops them
 ```
 
-Backend startup requires at least one entry in `ALLOWED_GITHUB_ORGS` or `ALLOWED_GITHUB_USERS`; an empty value in both stops the server. The desktop app's authenticated private local backend, which still serves threads started before This Mac moved to the bridge, is exempt. When both are configured, they form a union: dashboard login accepts an explicitly listed user **or** an active member of a listed organization. Organization membership is verified server-side with the installation token and fails closed on any API error; install the App in every listed organization and grant **Organization → Members: Read-only**. A GitHub or Linear webhook is accepted if the repo's org is in `ALLOWED_GITHUB_ORGS` **or** the `owner/repo` is in `ALLOWED_GITHUB_REPOS`; both repository allowlists empty allows every installed repository. For Slack and dashboard requests, `ALLOWED_GITHUB_ORGS` also adds a prompt-level guard: editing a repository outside those orgs requires the user to name it with its full `https://github.com/<owner>/<repo>` URL. When team LangSmith credentials are connected, every active member of a listed organization can use the read-only LangSmith trace tools, so only list organizations whose full membership may see team-level trace data.
+Backend startup requires at least one entry in `ALLOWED_GITHUB_ORGS` or `ALLOWED_GITHUB_USERS`; an empty value in both stops the server. The desktop app's authenticated private local backend, which still serves threads started before This Mac moved to the bridge, is exempt. When both are configured, they form a union: dashboard login accepts an explicitly listed user **or** an active member of a listed organization. Organization membership is verified server-side with the installation token and fails closed on any API error; install the App in every listed organization and grant **Organization → Members: Read-only**. A GitHub or Linear webhook is accepted if the repo's org is in `ALLOWED_GITHUB_ORGS` **or** the `owner/repo` is in `ALLOWED_GITHUB_REPOS`; both repository allowlists empty allows every installed repository. For Slack and dashboard requests, `ALLOWED_GITHUB_ORGS` also adds a prompt-level guard: editing a repository outside those orgs requires the user to name it with its full `https://github.com/<owner>/<repo>` URL.
 
 **Users.** A person gets a `users` row on their first dashboard sign-in, with their GitHub account as its first identity; connecting Slack from **Settings → Connections** adds the Slack account to the same row, which is how a Slack sender resolves to a GitHub login. **Admin → Users** lists everyone Open SWE knows. An unlinked person who tags Open SWE in Slack gets a run with the GitHub App's installation permissions and a "link your GitHub account" prompt; signing in and connecting Slack completes it. Records from the older Store-backed user mapping are imported into `users` on the first startup that finds them, then deleted.
 

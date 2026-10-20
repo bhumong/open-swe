@@ -318,7 +318,7 @@ async def test_slack_breakout_thread_success(
     )
     monkeypatch.setattr(slack_breakout_tool, "dispatch_agent_run", fake_dispatch_agent_run)
     monkeypatch.setattr(slack_breakout_tool, "store_slack_run_mapping", fake_store_mapping)
-    monkeypatch.setattr(slack_breakout_tool, "get_langsmith_trace_url", _fake_trace_url)
+    monkeypatch.setattr(slack_breakout_tool, "get_thread_trace_url", _fake_trace_url)
     get_permalink = AsyncMock(return_value=permalink)
     monkeypatch.setattr(slack_breakout_tool, "get_slack_permalink", get_permalink)
     monkeypatch.setattr(
@@ -483,7 +483,7 @@ async def test_breakout_preserves_requester_and_credential_scope(
     monkeypatch.setattr(slack_breakout_tool, "post_slack_thread_reply_with_ts", post)
     monkeypatch.setattr(slack_breakout_tool, "bind_slack_thread_id", AsyncMock())
     monkeypatch.setattr(slack_breakout_tool, "store_slack_run_mapping", AsyncMock())
-    monkeypatch.setattr(slack_breakout_tool, "get_langsmith_trace_url", _fake_trace_url)
+    monkeypatch.setattr(slack_breakout_tool, "get_thread_trace_url", _fake_trace_url)
     monkeypatch.setattr(slack_breakout_tool, "dispatch_agent_run", dispatch)
 
     result = await slack_breakout_tool.slack_breakout_thread("Title", "Instructions")

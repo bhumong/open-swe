@@ -10,6 +10,7 @@ from langchain.agents.middleware.types import ModelRequest, ModelResponse
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage
 
+from openswe.middleware import model_fallback
 from openswe.middleware.model_fallback import (
     ModelFallbackMiddleware,
 )
@@ -70,7 +71,9 @@ class TestModelFallbackMiddleware:
                 await middleware.awrap_model_call(ModelRequest(model=other, messages=[]), handler)
 
     @pytest.mark.asyncio
-    async def test_retry_spans_cover_backoff_and_attempt_without_error_body(self) -> None:
+    async def test_retry_observations_cover_backoff_and_attempt_without_error_body(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         primary = MagicMock(model_name="primary")
         fallback = MagicMock(model_name="fallback")
         request = _make_request()
@@ -79,16 +82,35 @@ class TestModelFallbackMiddleware:
         response = ModelResponse(result=[AIMessage(content="done")])
         handler = AsyncMock(side_effect=[TimeoutError("secret"), _openai_5xx(), response])
         spans: list[MagicMock] = []
+        observations: list[tuple[str, dict[str, object]]] = []
 
-        def make_span(*args: object, **kwargs: object) -> MagicMock:
+        def make_span() -> MagicMock:
             span = MagicMock()
             span.__aenter__ = AsyncMock(return_value=span)
             span.__aexit__ = AsyncMock(return_value=False)
             spans.append(span)
             return span
 
+        class _Observation:
+            def __init__(self, name: str, metadata: dict[str, object]) -> None:
+                observations.append((name, metadata))
+                self.span = make_span()
+
+            async def __aenter__(self) -> MagicMock:
+                return self.span
+
+            async def __aexit__(self, *_: object) -> bool:
+                return False
+
+        def make_observation(
+            name: str, *, input: object, metadata: dict[str, object]
+        ) -> _Observation:
+            del input
+            return _Observation(name, metadata)
+
+        monkeypatch.setattr(model_fallback, "langfuse_observation", make_observation, raising=False)
+
         with (
-            patch("openswe.middleware.model_fallback.trace", side_effect=make_span) as traced,
             patch(
                 "openswe.middleware.model_fallback.asyncio.sleep", new_callable=AsyncMock
             ) as sleep,
@@ -99,8 +121,9 @@ class TestModelFallbackMiddleware:
             ).awrap_model_call(request, handler)
 
         assert result is response
-        assert traced.call_count == 2
-        first, second = [call.kwargs["metadata"] for call in traced.call_args_list]
+        assert len(observations) == 2
+        assert [name for name, _ in observations] == ["model_retry", "model_retry"]
+        first, second = [metadata for _, metadata in observations]
         assert first["failed_model"] == "primary"
         assert first["next_model"] == "fallback"
         assert first["error_type"] == "TimeoutError"
@@ -108,9 +131,9 @@ class TestModelFallbackMiddleware:
         assert second["next_model"] == "primary"
         assert second["status_code"] == 503
         assert second["backoff_seconds"] == 5.0
-        assert "secret" not in str(traced.call_args_list)
-        spans[0].end.assert_called_once_with(error="APIStatusError")
-        spans[1].end.assert_called_once_with(outputs={"outcome": "success"})
+        assert "secret" not in str(observations)
+        spans[0].update.assert_called_once_with(level="ERROR", status_message="APIStatusError")
+        spans[1].update.assert_called_once_with(output={"outcome": "success"})
         sleep.assert_awaited_once_with(5.0)
 
     @pytest.mark.asyncio

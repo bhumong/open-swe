@@ -1,15 +1,14 @@
-from dataclasses import dataclass
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
 
 import pytest
 from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig, RunnableLambda
-from langchain_core.tracers.langchain import LangChainTracer
-from langsmith import trace, tracing_context
-from langsmith.run_trees import RunTree
 
+import openswe.model_request as model_request
 import openswe.server as server
 from openswe.dashboard.options import available_requested_models
 from openswe.middleware.model_selection import (
@@ -32,6 +31,33 @@ class Handoff:
 
     async def prepare(self, state: PrepareRunState | None = None) -> dict[str, object]:
         return await self.middleware._prepare(state or {"messages": []}, MagicMock())
+
+
+@dataclass
+class CapturedObservation:
+    name: str
+    input: object
+    metadata: object
+    updates: dict[str, object] = field(default_factory=dict)
+
+    def update(self, **values: object) -> None:
+        self.updates.update(values)
+
+
+@pytest.fixture
+def observations(monkeypatch: pytest.MonkeyPatch) -> list[CapturedObservation]:
+    captured: list[CapturedObservation] = []
+
+    @asynccontextmanager
+    async def observe(
+        name: str, *, input: object = None, metadata: object = None
+    ) -> AsyncIterator[CapturedObservation]:
+        observation = CapturedObservation(name, input, metadata)
+        captured.append(observation)
+        yield observation
+
+    monkeypatch.setattr(model_request, "langfuse_observation", observe)
+    return captured
 
 
 @pytest.fixture
@@ -119,7 +145,10 @@ def handoff(monkeypatch: pytest.MonkeyPatch) -> Handoff:
     "requested", ["anthropic:claude-opus-5-5", None, "inference_failure", "low_confidence"]
 )
 async def test_initial_handoff_persists_before_work_and_attributes_selected_model(
-    handoff: Handoff, monkeypatch: pytest.MonkeyPatch, requested: str | None
+    handoff: Handoff,
+    monkeypatch: pytest.MonkeyPatch,
+    observations: list[CapturedObservation],
+    requested: str | None,
 ) -> None:
     intent = (
         None
@@ -146,20 +175,12 @@ async def test_initial_handoff_persists_before_work_and_attributes_selected_mode
 
     infer = AsyncMock(side_effect=infer_intent)
     monkeypatch.setattr(server, "infer_requested_model", infer)
-    with (
-        tracing_context(enabled="local"),
-        trace("agent", inputs={}, metadata={"title_seed": "private opening request"}) as parent,
-    ):
-        prepared = await handoff.prepare()
-    (decision_span,) = parent.child_runs
+    prepared = await handoff.prepare()
+    decision_span = observations[0]
     assert decision_span.name == "Model selection decision"
-    assert decision_span.parent_run_id == parent.id
-    assert decision_span.trace_id == parent.trace_id
-    assert decision_span.inputs == {}
-    assert "title_seed" not in decision_span.metadata
-    assert parent.metadata["title_seed"] == "private opening request"
-    outputs = decision_span.outputs
-    assert outputs is not None
+    assert decision_span.input == {}
+    assert decision_span.metadata == {}
+    outputs = cast(dict[str, object], decision_span.updates["output"])
     assert outputs["selected_model_id"] == prepared["selected_model_id"]
     assert outputs["selected_effort"] == prepared["selected_effort"]
     assert outputs["requested_model"] == requested
@@ -173,7 +194,8 @@ async def test_initial_handoff_persists_before_work_and_attributes_selected_mode
         if outcome == "low_confidence"
         else "no_request"
     )
-    assert outputs["classifier"]["confidence"] == (
+    classifier = cast(dict[str, object], outputs["classifier"])
+    assert classifier["confidence"] == (
         None if outcome == "inference_failure" else 0.4 if outcome == "low_confidence" else 0.95
     )
     assert handoff.settings["model_handoff_complete"] is True
@@ -186,12 +208,11 @@ async def test_initial_handoff_persists_before_work_and_attributes_selected_mode
         assert handoff.settings["model_id"] == requested
         assert handoff.settings["model_routing_enabled"] is False
     handoff.store.assert_awaited_once_with(server.client, "thread-1", handoff.settings, strict=True)
-    with tracing_context(enabled="local"), trace("agent", inputs={}) as later:
-        assert (await handoff.prepare())["selected_model_id"] == prepared["selected_model_id"]
-    (reused,) = later.child_runs
-    assert reused.outputs is not None
-    assert reused.outputs["outcome"] == ("reused_saved_choice" if requested else "not_classified")
-    assert reused.outputs["classifier"]["outcome"] == "not_run"
+    assert (await handoff.prepare())["selected_model_id"] == prepared["selected_model_id"]
+    reused = cast(dict[str, object], observations[1].updates["output"])
+    assert reused["outcome"] == ("reused_saved_choice" if requested else "not_classified")
+    reused_classifier = cast(dict[str, object], reused["classifier"])
+    assert reused_classifier["outcome"] == "not_run"
     infer.assert_awaited_once()
 
 
@@ -243,6 +264,7 @@ async def test_explicit_auto_selection_replaces_checkpoint_route(
 async def test_handoff_validates_and_persists_before_selecting_model(
     handoff: Handoff,
     monkeypatch: pytest.MonkeyPatch,
+    observations: list[CapturedObservation],
     image_type: str | None,
     model: str,
     failure: str | None,
@@ -276,15 +298,13 @@ async def test_handoff_validates_and_persists_before_selecting_model(
             "image": "does not support image input",
             "unavailable": "unavailable",
         }[failure]
-        with tracing_context(enabled="local"), trace("agent", inputs={}) as parent:
-            with pytest.raises(error, match=match):
-                await handoff.prepare(state)
-        (decision_span,) = parent.child_runs
-        assert decision_span.outputs is not None
-        assert decision_span.outputs["selected_model_id"] is None
-        assert decision_span.outputs["pin_persisted"] is False
+        with pytest.raises(error, match=match):
+            await handoff.prepare(state)
+        decision_span = cast(dict[str, object], observations[0].updates["output"])
+        assert decision_span["selected_model_id"] is None
+        assert decision_span["pin_persisted"] is False
         assert (
-            decision_span.outputs["outcome"]
+            decision_span["outcome"]
             == {
                 "image": "incompatible_request",
                 "unavailable": "unavailable_request",
@@ -303,7 +323,9 @@ async def test_handoff_validates_and_persists_before_selecting_model(
 
 
 async def test_later_run_traces_saved_choice_without_classification(
-    handoff: Handoff, monkeypatch: pytest.MonkeyPatch
+    handoff: Handoff,
+    monkeypatch: pytest.MonkeyPatch,
+    observations: list[CapturedObservation],
 ) -> None:
     model = "anthropic:claude-opus-5-5"
     handoff.middleware._requested_models = None
@@ -314,42 +336,28 @@ async def test_later_run_traces_saved_choice_without_classification(
     handoff.middleware._model_selection._routing_mode = None
     infer = AsyncMock()
     monkeypatch.setattr(server, "infer_requested_model", infer)
-    posted: list[RunTree] = []
-
-    def capture(span: RunTree, **kwargs: object) -> None:
-        assert span.inputs == {}
-        assert span.metadata == {"ls_method": "trace"}
-        posted.append(span)
-
-    monkeypatch.setattr(RunTree, "post", capture)
-    monkeypatch.setattr(RunTree, "patch", capture)
-    tracing_client = MagicMock()
-    parent_id = uuid4()
     metadata = {
         "title_seed": "private opening request",
         "prompt": "private system prompt",
         "credentials": "synthetic-secret",
     }
-    with tracing_context(enabled=True, client=tracing_client):
-        prepared = await RunnableLambda(handoff.prepare).ainvoke(
-            {"messages": [HumanMessage(content="private conversation")]},
-            config={
-                "run_id": parent_id,
-                "metadata": metadata,
-                "callbacks": [LangChainTracer(client=tracing_client)],
-            },
-        )
-    decision_span = posted[0]
-    assert len(posted) == 2
+    prepared = await RunnableLambda(handoff.prepare).ainvoke(
+        {"messages": [HumanMessage(content="private conversation")]},
+        config={"metadata": metadata},
+    )
+    assert len(observations) == 1
+    decision_span = observations[0]
     assert decision_span.name == "Model selection decision"
-    assert decision_span.parent_run_id == parent_id
-    assert decision_span.trace_id == parent_id
-    assert decision_span.outputs is not None
-    assert decision_span.outputs["outcome"] == "reused_saved_choice"
-    assert decision_span.outputs["requested_model"] == model
-    assert decision_span.outputs["selected_model_id"] == prepared["selected_model_id"] == model
-    assert decision_span.outputs["pin_persisted"] is True
-    assert decision_span.outputs["classifier"]["outcome"] == "not_run"
+    assert decision_span.input == {}
+    assert decision_span.metadata == {}
+    assert "credentials" not in cast(dict[str, object], decision_span.metadata)
+    outputs = cast(dict[str, object], decision_span.updates["output"])
+    assert outputs["outcome"] == "reused_saved_choice"
+    assert outputs["requested_model"] == model
+    assert outputs["selected_model_id"] == prepared["selected_model_id"] == model
+    assert outputs["pin_persisted"] is True
+    classifier = cast(dict[str, object], outputs["classifier"])
+    assert classifier["outcome"] == "not_run"
     infer.assert_not_awaited()
     handoff.store.assert_not_awaited()
 

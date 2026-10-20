@@ -29,7 +29,9 @@ async def configured(fake_store, monkeypatch):
     monkeypatch.setattr(SlackChannel, "fetch", AsyncMock(return_value=dict(CHANNEL)))
     monkeypatch.setattr(turns, "has_active_run", AsyncMock(return_value=False))
     monkeypatch.setattr(
-        service, "get_langsmith_trace_url", AsyncMock(return_value="https://smith/t")
+        service,
+        "get_thread_trace_url",
+        AsyncMock(return_value="https://langfuse.example/project/p/traces/t"),
     )
     return fake_store
 

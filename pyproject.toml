@@ -20,6 +20,7 @@ dependencies = [
     "langchain-anthropic>=1.7.4",
     "langgraph-cli[inmem]>=0.4.31",
     "langsmith>=0.14.0",
+    "langfuse>=4.15.6,<5",
     "langchain-openai>=1.6.5,<2.0.0",
     "openai>=3.10.0,<4.0.0",
     "langchain-fireworks>=1.6.2",

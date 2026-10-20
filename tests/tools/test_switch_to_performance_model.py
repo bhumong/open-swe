@@ -24,7 +24,7 @@ async def test_switch_persists_and_updates_the_running_model(
     monkeypatch.setattr(module, "langgraph_client", lambda: object())
     monkeypatch.setattr(module, "load_thread_settings", AsyncMock(return_value=settings))
     feedback = AsyncMock(return_value=True)
-    monkeypatch.setattr(module, "create_langsmith_feedback", feedback)
+    monkeypatch.setattr(module, "create_trace_score", feedback)
     saved = AsyncMock()
     monkeypatch.setattr(module, "store_thread_settings", saved)
     result = await switch_tool(tool_call_id="switch-call")

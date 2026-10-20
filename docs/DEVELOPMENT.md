@@ -1,14 +1,15 @@
 # Local Development
 
-Run Open SWE on your machine: the backend and the dashboard on `http://localhost:2024`, with GitHub and Slack webhooks arriving through a tunnel. Deploying it for a team is the [installation guide](INSTALLATION.md).
+Run Open SWE on your machine with the backend and dashboard at `http://localhost:2024` and a local Langfuse instance at `http://localhost:3030`. The normal development path stays on loopback and does not need a tunnel, Slack app, or GitHub App. The optional webhook integration path is at the end of this guide. Deploying Open SWE for a team is covered by the [installation guide](INSTALLATION.md).
 
 ## Prerequisites
 
 - **Python 3.14+** and [uv](https://docs.astral.sh/uv/)
 - [LangGraph CLI](https://docs.langchain.com/langsmith/cli) (installed by `uv sync`)
 - Node 22.22.2+ and [pnpm](https://pnpm.io/) for the dashboard
-- A free [ngrok](https://ngrok.com/) account, so GitHub and Slack can reach your local backend (step 3)
-- A Slack workspace where you may create apps, and a GitHub account or organization where you may create a GitHub App
+- Docker with the Compose plugin
+- [GitHub CLI](https://cli.github.com/) authenticated with `gh auth login` (local dashboard sign-in)
+- An Anthropic API key; this checkout can copy it from the parent workspace's `.env`
 
 ## 1. Clone and install
 
@@ -20,90 +21,98 @@ source .venv/bin/activate
 uv sync --all-extras
 ```
 
-## 2. Create a GitHub App for your machine
+## 2. Prepare the local environment
 
-Follow [Create a GitHub App](INSTALLATION.md#3-create-a-github-app) in the installation guide with these values, and install it on the repositories you want to test against:
-
-- **Callback URL**: `http://localhost:2024/dashboard/api/auth/callback`. This is where GitHub sends the browser after "Sign in with GitHub" on your local dashboard.
-- **Webhook URL**: `https://<name>.ngrok-free.dev/webhooks/github` with your ngrok domain from step 3, or leave the webhook off (untick **Active**) if you only start runs from the dashboard. GitHub cannot deliver to `localhost`.
-
-Use a name of your own (GitHub App names are unique), and give it a distinct mention handle (`OPEN_SWE_MENTION_TAGS`) if a shared deployment already answers to `@openswe` in the same repositories.
-
-## 3. Tunnel for webhooks
-
-Always run an ngrok tunnel when starting Open SWE locally. GitHub and Slack need a public HTTPS hostname that stays the same across restarts. Reuse an existing tunnel and its exact configured domain, forwarding to the active backend (normally localhost:2024). If no tunnel is running, recover the domain from configuration or prior local runtime notes in the primary checkout before starting one; an automatically assigned hostname will not match existing webhook settings.
-
-For a first-time setup, the free ngrok plan gives you a static domain:
-
-1. Sign up at [dashboard.ngrok.com](https://dashboard.ngrok.com/signup) and install the agent (`brew install ngrok`, or the download the dashboard offers).
-2. Connect the agent to your account with the `ngrok config add-authtoken …` command shown under **Getting Started → Your Authtoken**.
-3. Under **Domains**, claim the free static domain. It looks like `<name>.ngrok-free.dev`.
-4. Start the tunnel and leave it running while you develop:
-
-   ```bash
-   make tunnel NGROK_DOMAIN=<name>.ngrok-free.dev   # or export NGROK_DOMAIN once in your shell
-   ```
-
-`make tunnel` runs `ngrok http 2024` on that domain with [`examples/ngrok/webhooks-only.yml`](../examples/ngrok/webhooks-only.yml) as its traffic policy, so only `/webhooks/*` is reachable from the internet. That restriction is not optional. Under `langgraph dev` the LangGraph API itself (`/threads`, `/runs`, `/assistants`, `/store`, …) has no authentication at all: the dashboard API checks its session cookie and the webhook endpoints check their signatures, but anyone who can reach port 2024 can read and create threads and runs. A tunnel that forwards the whole port publishes exactly that. Everything except the webhooks stays on `http://localhost:2024`, where you keep opening the dashboard. Check the policy once the backend is up (step 6): `curl https://<name>.ngrok-free.dev/webhooks/slack` answers `{"status":"ok", …}` from the backend, while `/ok` gets ngrok's own 404.
-
-Preserve the existing webhook traffic policy. For local Slack OAuth, also preserve the callback relay: requests to `/dashboard/api/slack/callback` on the ngrok domain must redirect to `http://localhost:2024/dashboard/api/slack/callback` with the complete query string intact. The stock webhooks-only policy blocks this path, so reuse the local policy containing that redirect when Slack OAuth is configured. The callback is a redirect to localhost; dashboard pages and API routes must remain inaccessible through the tunnel.
-
-## 4. Create a Slack app for your machine
-
-Slack delivers events to one URL per app, so a local backend needs its own Slack app rather than the one a shared deployment uses. Follow [Create the Slack app](INSTALLATION.md#5-create-the-slack-app) in the installation guide with your ngrok domain from step 3, `<name>.ngrok-free.dev`, as `<your-url>` (the manifest supplies the `https://`), and give it a name that says it is yours, for example `open-swe-<you>`; the bot's handle follows from it. Copy the four values it lists into `.env` in the next step.
-
-Slack checks the events Request URL against a running backend. If you create the app before `make dev` is up, open **Event Subscriptions** afterwards and press **Retry**. The same applies whenever you change `SLACK_SIGNING_SECRET`: restart the backend, then Retry.
-
-## 5. Write `.env`
-
-Create `.env` in the repository root; `langgraph dev` loads it.
+Authenticate `gh` if needed, then create the local environment files:
 
 ```bash
-LANGSMITH_API_KEY=""            # LangSmith → Settings → API Keys; also used for sandboxes and trace links
-LANGSMITH_TRACING="true"        # trace runs to LangSmith
-LANGSMITH_PROJECT=""            # optional project for traces and "View trace" links; default "default"
-
-ANTHROPIC_API_KEY=""            # any provider key; not needed if you use an LLM gateway (e.g. LangSmith Gateway; see the installation guide)
-
-GITHUB_APP_ID=""                # step 2
-GITHUB_APP_CLIENT_ID=""
-GITHUB_APP_CLIENT_SECRET=""
-GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n...\n-----END RSA PRIVATE KEY-----"   # one double-quoted line, \n between the PEM lines
-GITHUB_WEBHOOK_SECRET=""
-GITHUB_APP_INSTALLATION_ID=""
-ALLOWED_GITHUB_USERS=""         # your GitHub login; required unless ALLOWED_GITHUB_ORGS is set
-
-SLACK_BOT_TOKEN=""              # step 4: OAuth & Permissions → Bot User OAuth Token (xoxb-...)
-SLACK_SIGNING_SECRET=""         # Basic Information → App Credentials
-SLACK_BOT_USER_ID=""            # the bot's member id (bot profile → ⋮ → Copy member ID)
-SLACK_BOT_USERNAME=""           # the bot's handle, e.g. open_swe_you
-SLACK_PUBLIC_BASE_URL="https://<name>.ngrok-free.dev"  # your existing domain from step 3; used by Slack OAuth and the admin manifest
-
-TOKEN_ENCRYPTION_KEY=""         # openssl rand -base64 32  (encrypts stored GitHub and Slack tokens)
-DASHBOARD_JWT_SECRET=""         # openssl rand -hex 32     (signs the session cookie and OAuth state)
-CONFIGURED_ADMINS=""            # your GitHub login or email; admins see the Admin pages
-
-POSTGRES_URI=""                 # local dev defaults to localhost:5433; set this to use another database
+gh auth login
+make local-setup
 ```
 
-`LANGGRAPH_URL` defaults to `http://localhost:2024`, and `DASHBOARD_BASE_URL` / `DASHBOARD_API_BASE_URL` default to it, so none of the three is needed locally. Keep them on localhost when setting `SLACK_PUBLIC_BASE_URL` to the tunnel. You only need one model credential: either a provider key or a gateway key if you route model calls through an LLM gateway, such as the [LangSmith Gateway](INSTALLATION.md#4-model-providers-and-api-keys). How the running model is chosen is covered in the same section. Linear, if you use it, comes from the [Linear](INSTALLATION.md#linear) section of the installation guide, with your ngrok domain as the URL.
+The setup command reads only `ANTHROPIC_API_KEY` and any configured `LANGSMITH_*` values from the parent workspace `.env` (`../../.env` from this nested checkout). Set `OPEN_SWE_SOURCE_ENV` to another env-file path when needed. It creates the Langfuse initialization file at `infra/langfuse/.env` and Open SWE's `.env`, both ignored by Git with owner-only permissions. Generated passwords and API keys are not printed. It sets `LLM_MODEL_ID=anthropic:claude-haiku-5-5`, allows and grants admin access to the `gh` user, disables LangSmith tracing, and keeps configured LangSmith Gateway/Managed Tools settings.
 
-Open SWE needs a PostgreSQL database for its own tables, and `langgraph dev` does not provide one: it keeps LangGraph's threads and Store in memory, so the platform's Postgres is not there locally. In LangGraph's `local_dev` runtime, Open SWE defaults `POSTGRES_URI` to `postgresql://postgres:postgres@127.0.0.1:5433/postgres`; `make dev` and `make dev-ui` run the matching `postgres:16` container named `open-swe-postgres` when no explicit value is set. Docker Compose binds the container to loopback only and keeps its data in the `open-swe-postgres` volume, so stopping or removing the container preserves your local users, workspaces, and settings. `make postgres` starts it on its own; use `docker compose down` to stop it. Set `POSTGRES_URI` to skip the container and use any database you can create schemas in — see [Analytics storage](INSTALLATION.md#1-create-the-deployment) for what startup migrations create there, including the `repository`, `users`, and `workspace` tables.
+If the repository-root `.env` already exists, the command leaves it untouched. Merge these local settings into it manually. To initialize Langfuse separately, use `make langfuse-setup`.
 
-With a database, every thread created from then on is also recorded into the append-only transcript event log and its LangGraph metadata is stamped `transcript: v2`. The dashboard reads recorded threads from this log by default for everyone. Threads with agent turns from before recording started are never recorded and always read LangGraph state.
+Open SWE uses the `local` sandbox provider in this profile. It runs shell commands as your host user and is **not an operating-system isolation boundary**. Its workspace is `~/open-swe-local-workspace`; use a dedicated directory and do not place sensitive files there.
 
-`TEST_ANALYTICS_POSTGRES_URI` is the same thing for the test suite, and only for it: the tests that exercise those tables migrate one template database per test process, clone a throwaway database from it for each test, and drop both afterwards. The role therefore needs `CREATEDB`; the `postgres` superuser of a throwaway container is simplest (`docker run -d -p 5439:5432 -e POSTGRES_PASSWORD=postgres postgres:16`, then `postgresql+asyncpg://postgres:postgres@localhost:5439/postgres`), or grant it with `ALTER ROLE <user> CREATEDB`. Use a separate server from the one `make dev` uses. Unset, every such test skips rather than fails, so a run without it proves less than it appears to; CI sets it, so a regression in that code is caught there either way.
+## 3. Start local Langfuse
 
-## 6. Run
+```bash
+make langfuse-up
+```
+
+This starts Langfuse web, worker, Postgres, ClickHouse, Redis, and MinIO with persistent named volumes. Only the UI/API is published, on `127.0.0.1:3030`; its databases, cache, and object storage have no host ports. Open `http://localhost:3030`. The initial owner login and API keys are already created. To read the login, inspect only these two entries in the private file:
+
+```bash
+grep -E '^LANGFUSE_INIT_USER_(EMAIL|PASSWORD)=' infra/langfuse/.env
+```
+
+`make langfuse-down` stops the services and preserves their volumes. Do not add `-v` if you want to keep local traces and datasets. This profile does not expose MinIO's media endpoint, so Langfuse media uploads are unavailable; ordinary text traces and evaluations work.
+
+## 4. Run Open SWE
+
+Build the dashboard and start the local LangGraph runtime:
+
+```bash
+make build-dashboard
+make dev
+```
+
+`make dev` starts Open SWE's PostgreSQL container on `127.0.0.1:5433` when `POSTGRES_URI` is unset. This database is separate from Langfuse's internal Postgres. Open SWE and Langfuse both stay local; don't expose port 2024 through a tunnel because `langgraph dev` has unauthenticated runtime APIs.
+
+`langgraph dev` serves the graphs, the FastAPI app, and the dashboard build together on port 2024. Rebuild the dashboard after UI changes, or skip `make build-dashboard` if you only need the API. After changing `.env`, restart the backend.
+
+**Working on the UI?** Use `make dev-ui` for Vite hot reload with the backend still fronting port 2024:
+
+```bash
+make dev-ui
+```
+
+## 5. Verify the local loopback setup
+
+Sign in through the dashboard's **Continue with GitHub** link, which uses the authenticated `gh` CLI in `langgraph dev`. Then start a simple agent task. Confirm it appears in the local Langfuse project and that its trace link opens the same trace. The Langfuse project and admin evaluation page are available locally; the reviewer benchmark is not run automatically.
+
+GitHub App-backed operations (publishing reviews, inline review comments, and inbound webhooks) are unavailable without a GitHub App. Per-user GitHub reads work through the local `gh` login. For that path, `gh auth login` must be for the same user written to `ALLOWED_GITHUB_USERS` by setup.
+
+## Optional: GitHub and Slack webhooks
+
+Only follow this section when testing inbound webhooks. The loopback workflow above does not need an internet-facing tunnel.
+
+Create a machine-specific GitHub App using [Create a GitHub App](INSTALLATION.md#3-create-a-github-app). Use `http://localhost:2024/dashboard/api/auth/callback` as the callback and install it on the repositories you want to test. For inbound GitHub events, the webhook URL must use your static ngrok domain because GitHub cannot reach localhost.
+
+For a first-time tunnel setup, the free ngrok plan gives you a static domain:
+
+1. Sign up at [dashboard.ngrok.com](https://dashboard.ngrok.com/signup) and install the agent (`brew install ngrok`, or use the download from the dashboard).
+2. Connect it with the `ngrok config add-authtoken …` command shown under **Getting Started → Your Authtoken**.
+3. Under **Domains**, claim the free static domain, such as `<name>.ngrok-free.dev`.
+4. Start the restricted webhook tunnel and leave it running:
+
+   ```bash
+   make tunnel NGROK_DOMAIN=<name>.ngrok-free.dev
+   ```
+
+`make tunnel` uses [`examples/ngrok/webhooks-only.yml`](../examples/ngrok/webhooks-only.yml), which exposes only `/webhooks/*`. That restriction is required: the LangGraph API itself (`/threads`, `/runs`, `/assistants`, `/store`, …) has no authentication in `langgraph dev`. Keep dashboard and LangGraph routes on `http://localhost:2024`. Once running, `curl https://<name>.ngrok-free.dev/webhooks/slack` should reach the backend; `/ok` should receive ngrok's 404.
+
+For local Slack OAuth, keep the callback relay in the traffic policy: requests to `/dashboard/api/slack/callback` on the ngrok domain must redirect to `http://localhost:2024/dashboard/api/slack/callback` with the full query string. Do not expose dashboard pages or API routes through the tunnel.
+
+Create a separate Slack app for this checkout using [Create the Slack app](INSTALLATION.md#5-create-the-slack-app), with your ngrok domain and a distinct bot name. Add the app's bot token, signing secret, user ID, username, and `SLACK_PUBLIC_BASE_URL` to the ignored root `.env`. If Slack does not verify its events URL, restart `make dev` and press **Retry** in **Event Subscriptions**.
+
+For this optional integration, add the GitHub App's IDs, private key, webhook secret, and installation ID to `.env` too. `LANGGRAPH_URL`, `DASHBOARD_BASE_URL`, and `DASHBOARD_API_BASE_URL` default to localhost. Model routing is documented in [Model providers and API keys](INSTALLATION.md#4-model-providers-and-api-keys); a configured LangSmith Gateway remains available without sending traces there. Linear setup is in the [Linear guide](INSTALLATION.md#linear).
+
+## Local PostgreSQL and transcript storage
+
+Open SWE also needs PostgreSQL for its own tables; `langgraph dev` keeps threads and Store data in memory but does not provide this database. `make dev` and `make dev-ui` start a `postgres:16` container named `open-swe-postgres` on port 5433 when `POSTGRES_URI` is unset. Its `open-swe-postgres` volume preserves users, workspaces, and settings when the container stops. `make postgres` starts it independently; use `docker compose down` to stop it. Set `POSTGRES_URI` to use another database where the app can create schemas.
+
+With this database, new threads are also written to the append-only transcript event log and stamped `transcript: v2`; the dashboard reads recorded threads from this log. Older threads without recorded agent turns continue to read LangGraph state.
+
+`TEST_ANALYTICS_POSTGRES_URI` is only for tests. Tests clone temporary databases from a migrated template and drop them afterwards, so the role needs `CREATEDB`. A separate throwaway `postgres:16` container can use port 5439; unset this variable and the affected tests skip.
+
+## Dashboard and backend commands
 
 `make dev` refuses to start while something else listens on port 2024, and names the process. When switching worktrees, stop the previous backend gracefully and wait for it to release port 2024 before starting the replacement. Prepare the [worktree state](#langgraph-state-across-worktrees) before startup.
 
-```bash
-make build-dashboard   # pnpm install + Vite build into ui/.output/public
-make dev               # langgraph dev on http://localhost:2024, serving the API and the dashboard (starts the Postgres container first)
-```
-
-`langgraph dev` serves the graphs, the FastAPI app, and the dashboard build together on port 2024. The bundled UI is a static build, so rebuild it when you pull UI changes, or skip `make build-dashboard` if you only need webhooks and the API. It reloads on code changes only: after editing `.env`, restart it.
+`langgraph dev` serves the graphs, the FastAPI app, and the dashboard build together on port 2024. The bundled UI is static, so rebuild it after UI changes, or skip `make build-dashboard` if you only need the API. It reloads on code changes only: after editing `.env`, restart it.
 
 **Working on the UI?** Have the backend front the Vite dev server instead of serving a build:
 
@@ -126,21 +135,9 @@ make dev-ui   # Vite on :3000 and the backend on :2024 forwarding UI requests to
 
 > `make run` serves the FastAPI app alone with uvicorn on port 8000, without the LangGraph runtime. Nothing that creates runs works there; use `make dev`.
 
-## 7. Verify it works
+With only the seeded `default` workspace, runs land there by default. Create additional workspaces from **Workspaces** to exercise routing locally: thread, `/workspace:<slug>` on the opening message (`workspace:<slug>` and `env:<slug>` also work), owning repository, bound Slack channel, user default, then `default`. See [How a run picks its workspace](INSTALLATION.md#7-verify-it-works) in the installation guide. Incidents require the optional Slack integration above.
 
-Before reporting readiness, verify `/ok` on localhost, open the dashboard in a browser, and check tunnel forwarding and the OAuth callback redirect. A healthy `/ok` does not mean the UI is ready: `make dev` needs a dashboard build or a running Vite server to serve it.
-
-**Dashboard.** Open `http://localhost:2024`, click **Sign in with GitHub**, and you should land logged in. With your login in `CONFIGURED_ADMINS`, the **Administration** pages appear. Set **Admin → Defaults → Default repository**, then start a task from the composer.
-
-**Slack.** With the tunnel running and the Request URL verified, invite your bot to a channel and mention it: `@open_swe_you what's in the repo?`. It replies in a thread; ngrok's inspector at `http://localhost:4040` shows the event arriving.
-
-**GitHub.** With the tunnel running and the App's webhook pointed at it, comment `@openswe what files are in this repo?` on an issue in a repository where the App is installed. Within a few seconds you should see a 👀 reaction, a run in your LangSmith project, and a reply comment. GitHub-triggered runs act as the commenting user, so that account has to have signed in to your local dashboard once. The App's **Advanced** tab lists every delivery and its response, and ngrok's inspector at `http://localhost:4040` shows what arrived.
-
-With only the seeded `default` workspace, Slack and GitHub runs land there by default. Create additional workspaces from the **Workspaces** page to exercise routing locally: the same order applies as in a deployment (thread, `/workspace:<slug>` on the opening message — `workspace:<slug>` and `env:<slug>` still work, owning repository, bound Slack channel, user default, then `default`); see [How a run picks its workspace](INSTALLATION.md#7-verify-it-works) in the installation guide.
-
-**Incidents.** Follow [Incidents setup](INSTALLATION.md#incidents) to enroll Slack channels. Set `SLACK_APP_ID`; anyone in a channel can pause or complete its incident, and asking the agent requires a connected Open SWE account. Incident turns run on the main `agent` graph and are dispatched straight from the Slack webhook, so `make dev` or `make dev-ui` is all that is needed.
-
-Record the worktree, process IDs, fixed tunnel domain, and state location in ignored `logs/local-dev/` notes in the primary checkout so the next session can reuse them.
+Record worktree, process IDs, and local state locations in ignored `logs/local-dev/` notes in the primary checkout if you need to resume later.
 
 ## Backend API documentation
 
@@ -162,7 +159,7 @@ Keep state, backups, and environment files ignored by Git. Reuse the existing lo
 
 ## Sign in locally with the `gh` CLI
 
-The dashboard's per-user reads — the PR list, one PR's details, a PR preview — run on the signed-in person's own OAuth token, and the `gh` CLI already holds one. `GET /dashboard/api/auth/dev-login` stores it and mints the session, so a machine-local GitHub App (step 2) is only needed for the App-backed endpoints. With no `GITHUB_APP_CLIENT_ID` configured, **Continue with GitHub** redirects here on its own; `/dashboard/api/auth/dev-login?redirect_to=/agents/reviews` skips the page.
+The dashboard's per-user reads — the PR list, one PR's details, a PR preview — run on the signed-in person's own OAuth token, and the `gh` CLI already holds one. `GET /dashboard/api/auth/dev-login` stores it and mints the session, so a machine-local GitHub App (see the optional webhook setup above) is only needed for App-backed endpoints. With no `GITHUB_APP_CLIENT_ID` configured, **Continue with GitHub** redirects here on its own; `/dashboard/api/auth/dev-login?redirect_to=/agents/reviews` skips the page.
 
 It is refused with a 404 outside `langgraph dev`, which is the only runtime reporting the `local_dev` API variant, and the `ALLOWED_GITHUB_USERS` allowlist still applies — set it to your own login. `DASHBOARD_JWT_SECRET` signs the session.
 
@@ -190,7 +187,7 @@ and the GitHub App needs `http://localhost:3000/dashboard/api/auth/callback` as 
 
 ## Dashboard against a deployed backend
 
-`pnpm run dev:prod` runs the Vite dev server, hot reload and all, against a deployment instead of a local backend — UI work against real threads, repositories, and settings without running the agent locally. Put the deployment in `.env` (step 5's file, gitignored):
+`pnpm run dev:prod` runs the Vite dev server, hot reload and all, against a deployment instead of a local backend — UI work against real threads, repositories, and settings without running the agent locally. Put the deployment in the gitignored root `.env`:
 
 ```bash
 DASHBOARD_API_URL=https://your-deployment.example.com   # a preview deploy, not production
@@ -257,6 +254,9 @@ For "how long until the agent answers", read `@context.step_generation_start_ms`
 
 | Target | What it does |
 |---|---|
+| `make local-setup` | Creates private, ignored local Langfuse and Open SWE env files |
+| `make langfuse-setup` | Creates or reuses only the local Langfuse initialization file |
+| `make langfuse-up`, `make langfuse-down` | Start or stop the loopback Langfuse stack; `down` preserves volumes |
 | `make dev` | `langgraph dev` on port 2024: graphs, webhooks, dashboard API, and the bundled dashboard when a build exists |
 | `make dev-ui` | `make web` and `make dev` together, the backend fronting Vite so the UI hot-reloads on port 2024 |
 | `make web` | The Vite dev server alone on port 3000 |
@@ -273,7 +273,7 @@ For "how long until the agent answers", read `@context.step_generation_start_ms`
 
 ### Webhook not receiving events
 
-- The tunnel must be running (`make tunnel`) against port 2024, and the URL in GitHub or Slack must be your ngrok domain. Do not swap in a tunnel that forwards the whole port; see step 3. GitHub shows each delivery under the App's **Advanced** tab; ngrok's inspector at `http://localhost:4040` shows what arrived. With the webhooks-only policy, ngrok itself answers 404 for anything outside `/webhooks/*`, so test with `/webhooks/slack`, not `/ok`.
+- The tunnel must be running (`make tunnel`) against port 2024, and the URL in GitHub or Slack must be your ngrok domain. Do not swap in a tunnel that forwards the whole port; see [Optional: GitHub and Slack webhooks](#optional-github-and-slack-webhooks). GitHub shows each delivery under the App's **Advanced** tab; ngrok's inspector at `http://localhost:4040` shows what arrived. With the webhooks-only policy, ngrok itself answers 404 for anything outside `/webhooks/*`, so test with `/webhooks/slack`, not `/ok`.
 - Restart the backend after changing `.env`: `langgraph dev` reloads on code changes only, so a new `GITHUB_WEBHOOK_SECRET` or `SLACK_SIGNING_SECRET` is not picked up until then, and every delivery is rejected as `Invalid signature` in the meantime. Slack then needs **Retry** on its Request URL under **Event Subscriptions**.
 - Webhook secrets are required: without `GITHUB_WEBHOOK_SECRET`, `SLACK_SIGNING_SECRET`, or `LINEAR_WEBHOOK_SECRET`, every request to that endpoint is rejected with 401.
 

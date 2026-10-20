@@ -66,6 +66,7 @@ from openswe.tools.plan_walkthrough import (
 from openswe.tools.record_human_input import record_human_input
 from openswe.ui_invalidations import Topic
 from openswe.utils.deferred_model import make_deferred_error_model
+from openswe.utils.langfuse import configure_graph_tracing
 from openswe.utils.model import DEFAULT_LLM_REASONING, make_model, provider_model_kwargs
 from openswe.walkthrough.checkout import CheckoutError, PinnedCheckout
 from openswe.walkthrough.planner import PlannerUnavailableError, PlanWorkspace
@@ -281,7 +282,7 @@ async def get_review_scout(config: RunnableConfig) -> Pregel:
             middleware=[
                 AnthropicPromptCachingMiddleware(ttl="1h", unsupported_model_behavior="ignore")
             ],
-        ).with_config(bindable_config(config))
+        ).with_config(configure_graph_tracing(bindable_config(config), graph_name="review-scout"))
 
     settings = await cached_workspace_settings(cfg.workspace_slug)
     model_id, effort = settings.review_scout_model
@@ -333,8 +334,8 @@ async def get_review_scout(config: RunnableConfig) -> Pregel:
                 FinishPlanMiddleware(thread_id=thread_id, config=config),
             ],
         ),
-    ).with_config(bindable_config(config))
+    ).with_config(configure_graph_tracing(bindable_config(config), graph_name="review-scout"))
 
 
-# langgraph.json entrypoint. Runs trace into LANGSMITH_PROJECT like everything else.
+# langgraph.json entrypoint; graph tracing is configured in both factory paths above.
 traced_review_scout = get_review_scout

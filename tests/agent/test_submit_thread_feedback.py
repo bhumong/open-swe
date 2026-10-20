@@ -24,7 +24,7 @@ async def context(registry_db: None, monkeypatch: pytest.MonkeyPatch) -> AsyncMo
 
     monkeypatch.setattr(tool, "agent_thread_pr_state_lock", unlocked)
     monkeypatch.setattr(tool, "langgraph_client", lambda: None)
-    monkeypatch.setattr(tool, "create_langsmith_thread_feedback", export)
+    monkeypatch.setattr(tool, "create_thread_trace_score", export)
     monkeypatch.setattr(tool, "record_feedback_submission", AsyncMock())
     return export
 

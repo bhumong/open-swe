@@ -10,7 +10,7 @@ from openswe.audit_logs.tools import audit_tool
 from openswe.middleware.model_selection import ModelSelectionState, SelectedRoute, normalize_route
 from openswe.run_config import RunConfig
 from openswe.thread_feedback import FEEDBACK, Feedback
-from openswe.utils.langsmith import create_langsmith_thread_feedback
+from openswe.utils.langfuse import create_thread_trace_score
 from openswe.utils.thread_ops import langgraph_client
 from openswe.utils.thread_pr_state import agent_thread_pr_state_lock
 
@@ -43,7 +43,7 @@ async def submit_thread_feedback(
         record.rating = rating
         record.comment = normalized_comment
         await FEEDBACK.put(cfg.thread_id, record)
-        exported = await create_langsmith_thread_feedback(
+        exported = await create_thread_trace_score(
             cfg.thread_id,
             "rating",
             score=1.0 if rating == "good" else 0.0,
@@ -53,6 +53,7 @@ async def submit_thread_feedback(
                 "run_id": run_id,
                 **({"model_route": route} if route else {}),
             },
+            run_id=run_id or None,
         )
         await record_feedback_submission(
             feedback_key=f"thread:{cfg.thread_id}",

@@ -144,11 +144,20 @@ class Registry:
 
 ENV = Registry()
 
-# --- LangSmith and LangGraph -------------------------------------------------------
+# --- Observability and LangGraph ---------------------------------------------------
+ENV.var("LANGFUSE_PUBLIC_KEY", "Langfuse project public key.", secret=True)
+ENV.var("LANGFUSE_SECRET_KEY", "Langfuse project secret key.", secret=True)
+ENV.var("LANGFUSE_BASE_URL", "Langfuse API and UI base URL.")
+ENV.var("LANGFUSE_TRACING_ENVIRONMENT", "Langfuse environment label for exported observations.")
+ENV.var(
+    "LANGFUSE_PROJECT_NAME",
+    "Display label for the Langfuse project selected by LANGFUSE_PUBLIC_KEY.",
+    default="Open SWE",
+)
 ENV.var(
     "LANGSMITH_API_KEY",
-    "LangSmith API key for sandboxes, trace links and feedback; the LangSmith SDK "
-    "reads the same variable for tracing and LangGraph Platform injects it.",
+    "LangSmith API key for retained runtime features such as the LangSmith sandbox provider, "
+    "Gateway, and Managed Tools. It is not used for tracing.",
     secret=True,
 )
 ENV.var(
@@ -157,13 +166,8 @@ ENV.var(
     default="https://api.smith.langchain.com",
 )
 ENV.var(
-    "LANGSMITH_TENANT_ID",
-    "LangSmith workspace id used in trace links; discovered from the workspace when unset.",
-)
-ENV.var(
     "LANGSMITH_PROJECT",
-    "LangSmith project every run traces into and trace links point at; the SDK reads it and "
-    "LangGraph Platform sets it to the deployment name.",
+    "LangSmith project name injected by LangGraph Platform; Open SWE sends traces to Langfuse.",
     default="default",
     aliases=("LANGCHAIN_PROJECT",),
 )
@@ -193,11 +197,11 @@ ENV.var(
     default="true",
 )
 ENV.var(
-    "REVIEWER_OUTCOMES_DATASET",
-    "LangSmith dataset for reviewer finding outcomes.",
+    "LANGFUSE_REVIEWER_OUTCOMES_DATASET",
+    "Langfuse dataset for reviewer finding outcomes.",
     default="openswe-reviewer-outcomes",
+    aliases=("REVIEWER_OUTCOMES_DATASET",),
 )
-ENV.var("EVAL_LANGSMITH_PROJECT", "LangSmith project reviewer evals trace into.")
 ENV.var(
     "LANGGRAPH_URL",
     "URL of the LangGraph server the FastAPI side calls to create and stream runs.",
@@ -231,7 +235,7 @@ ENV.var(
 )
 ENV.var(
     "LANGSMITH_TRACING",
-    "Enables LangSmith tracing; read by the LangSmith SDK and injected by LangGraph Platform.",
+    "LangSmith SDK automatic tracing toggle; disable it when Open SWE traces to Langfuse.",
 )
 ENV.var(
     "LANGCHAIN_API_KEY",

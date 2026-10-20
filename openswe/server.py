@@ -295,6 +295,7 @@ from openswe.utils.dashboard_links import dashboard_base_url, dashboard_plan_url
 from openswe.utils.deferred_model import make_deferred_error_model
 from openswe.utils.gateway import gateway_env_default
 from openswe.utils.json_types import as_json_object, thread_metadata
+from openswe.utils.langfuse import configure_graph_tracing
 from openswe.utils.model import (
     DEFAULT_LLM_REASONING,
     ModelKwargs,
@@ -1065,21 +1066,26 @@ class PrepareAgentRunMiddleware(BasePrepareRunMiddleware):
                 prepared = await self._prepare_with_decision(state, runtime, decision)
                 return prepared
             finally:
-                span.end(
-                    outputs={
-                        "requested_model": decision.requested_model,
-                        "classifier": vars(decision.classifier),
-                        "requested_effort": decision.requested_effort,
-                        "effort_classifier": vars(decision.effort_classifier),
-                        "outcome": decision.outcome,
-                        "reason": decision.reason,
-                        "pin_persisted": decision.pin_persisted,
-                        "selected_model_id": prepared.get("selected_model_id"),
-                        "selected_effort": prepared.get("selected_effort"),
-                        "route": prepared.get("model_route"),
-                    },
-                    error=None if prepared else "Model selection preparation failed",
-                )
+                if span is not None:
+                    span.update(
+                        output={
+                            "requested_model": decision.requested_model,
+                            "classifier": vars(decision.classifier),
+                            "requested_effort": decision.requested_effort,
+                            "effort_classifier": vars(decision.effort_classifier),
+                            "outcome": decision.outcome,
+                            "reason": decision.reason,
+                            "pin_persisted": decision.pin_persisted,
+                            "selected_model_id": prepared.get("selected_model_id"),
+                            "selected_effort": prepared.get("selected_effort"),
+                            "route": prepared.get("model_route"),
+                        }
+                    )
+                    if not prepared:
+                        span.update(
+                            level="ERROR",
+                            status_message="Model selection preparation failed",
+                        )
 
     async def _prepare_with_decision(
         self, state: PrepareRunState, runtime: Runtime, decision: ModelSelectionDecision
@@ -1460,7 +1466,7 @@ async def build_agent(config: RunnableConfig, *, tool_surface: ToolSurface | Non
             middleware=[
                 AnthropicPromptCachingMiddleware(ttl="1h", unsupported_model_behavior="ignore")
             ],
-        ).with_config(bindable_config(config))
+        ).with_config(configure_graph_tracing(bindable_config(config), graph_name="agent"))
 
     from openswe.incidents.runtime import IncidentMiddleware, IncidentSession, load_incident_session
 
@@ -2235,7 +2241,7 @@ async def build_agent(config: RunnableConfig, *, tool_surface: ToolSurface | Non
                     ModelCallTimeoutMiddleware(),
                 ],
             ),
-        ).with_config(bindable_config(config))
+        ).with_config(configure_graph_tracing(bindable_config(config), graph_name="agent"))
     if tool_surface is not None:
         tool_surface.graph = graph
         tool_surface.dynamic = full_dynamic_tools
@@ -2262,5 +2268,5 @@ async def get_agent(config: RunnableConfig) -> Pregel:
         return await _get_agent(config)
 
 
-# langgraph.json entrypoint. Runs trace into LANGSMITH_PROJECT like everything else.
+# langgraph.json entrypoint; graph tracing is configured in both factory paths above.
 traced_agent = get_agent

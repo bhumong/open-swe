@@ -1,29 +1,28 @@
-"""Track the reviewer eval for the admin dashboard.
+"""Launch and track Langfuse reviewer evaluations for the admin dashboard."""
 
-``start_reviewer_eval`` launches the eval detached in a LangSmith sandbox,
-isolated from the serving deployment. The harness reports progress
-into a LangGraph store record (namespace ``["evals"]``, key ``"reviewer"``) via
-``evals.reviewer.store_reporter``; this module reads that record for the
-dashboard and reconciles a run whose heartbeat has gone stale (e.g. the sandbox
-stopped) to ``failed``.
-"""
-
+import asyncio
+import base64
 import logging
+import os
 import shlex
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal, TypedDict
 from urllib.parse import urlsplit
 
 from openswe.config import ENV
+from openswe.dashboard.dev_login import dev_login_enabled
 from openswe.review.eval_store import (
-    DEFAULT_EVAL_PROJECT,
     EVALS_NAMESPACE,
     HEARTBEAT_STALE_SECONDS,
+    LOG_TAIL_CHARS,
     REVIEWER_EVAL_KEY,
 )
 from openswe.store import get_value, now_iso, put_value
 from openswe.utils.build_info import backend_build_info
 from openswe.utils.gateway import gateway_base_url
+from openswe.utils.typed_json import JsonObject
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +35,7 @@ class ReviewerEvalConfig(TypedDict):
     dataset_name: str
     experiment_prefix: str
     max_concurrency: int
-    langsmith_project: str
+    langfuse_project: str
     langgraph_url: str
     assistant_id: str
     model_id: str
@@ -57,19 +56,20 @@ _HARNESS_ARGS = (
     "dataset_name",
     "experiment_prefix",
     "max_concurrency",
-    "langsmith_project",
+    "langfuse_project",
     "assistant_id",
     "model_id",
     "reasoning_effort",
     "score_mode",
     "severity_threshold",
 )
+_LOCAL_TASKS: set[asyncio.Task[None]] = set()
 
 DEFAULT_REVIEWER_EVAL_CONFIG: ReviewerEvalConfig = {
     "dataset_name": "openswe-reviewer-v2",
     "experiment_prefix": "openswe-review-confidence",
     "max_concurrency": 5,
-    "langsmith_project": DEFAULT_EVAL_PROJECT,
+    "langfuse_project": "Open SWE",
     "langgraph_url": "",
     "assistant_id": "reviewer",
     "model_id": "anthropic:claude-opus-5-5",
@@ -83,14 +83,14 @@ def _resolve_langgraph_url() -> str | None:
     return ENV.LANGGRAPH_URL.optional()
 
 
-def _eval_project() -> str:
-    return ENV.EVAL_LANGSMITH_PROJECT.optional() or DEFAULT_EVAL_PROJECT
+def _langfuse_project() -> str:
+    return ENV.LANGFUSE_PROJECT_NAME.get("Open SWE")
 
 
 def resolve_eval_config(config: ReviewerEvalConfig | None = None) -> ReviewerEvalConfig:
     resolved: ReviewerEvalConfig = {
         **DEFAULT_REVIEWER_EVAL_CONFIG,
-        "langsmith_project": _eval_project(),
+        "langfuse_project": _langfuse_project(),
         "langgraph_url": _resolve_langgraph_url() or "",
     }
     if config is not None:
@@ -104,7 +104,7 @@ def _idle_record() -> dict[str, Any]:
         "name": REVIEWER_EVAL_KEY,
         "status": "idle",
         "run_name": config["experiment_prefix"],
-        "langsmith_project": config["langsmith_project"],
+        "langfuse_project": config["langfuse_project"],
         "limit": None,
         "config_snapshot": config,
         "started_at": None,
@@ -166,6 +166,9 @@ async def get_reviewer_eval_status() -> dict[str, Any]:
     record = await _get_record()
     if record is None:
         return _idle_record()
+    if "langfuse_project" not in record:
+        record = {**record, "langfuse_project": _langfuse_project()}
+        record.pop("langsmith_project", None)
     if record.get("status") not in ACTIVE_STATUSES:
         return record
     if _is_heartbeat_fresh(record):
@@ -186,20 +189,30 @@ async def _fail(record: dict[str, Any], error: str) -> dict[str, Any]:
     )
 
 
-def _key_rule(name: str, urls: list[str], key: str) -> dict[str, Any]:
+def _key_rule(
+    name: str, urls: list[str], key: str, *, header_name: str = "x-api-key"
+) -> JsonObject:
     return {
         "name": name,
         "match_hosts": [urlsplit(url).netloc for url in urls],
-        "headers": [{"name": "x-api-key", "type": "opaque", "value": key}],
+        "headers": [{"name": header_name, "type": "opaque", "value": key}],
     }
+
+
+def _langfuse_auth_rule(base_url: str, public_key: str, secret_key: str) -> JsonObject:
+    credentials = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
+    return _key_rule(
+        "langfuse",
+        [base_url],
+        f"Basic {credentials}",
+        header_name="Authorization",
+    )
 
 
 def _harness_args(config: ReviewerEvalConfig, limit: int | None) -> list[str]:
     args: list[str] = []
     for key in _HARNESS_ARGS:
         args += [f"--{key.replace('_', '-')}", str(config[key])]
-    if reviewer_project := ENV.LANGSMITH_PROJECT.optional():
-        args += ["--reviewer-langsmith-project", reviewer_project]
     return args + (["--limit", str(limit)] if limit else [])
 
 
@@ -233,13 +246,23 @@ async def _launch_sandbox(
     langgraph_url = config["langgraph_url"] or ENV.LANGGRAPH_URL.get()
     gateway = gateway_base_url()
     gateway_key = ENV.LANGSMITH_GATEWAY_API_KEY.optional() or api_key
+    langfuse_base_url = ENV.LANGFUSE_BASE_URL.get("https://cloud.langfuse.com").rstrip("/")
+    langfuse_public_key = ENV.LANGFUSE_PUBLIC_KEY.require()
+    langfuse_secret_key = ENV.LANGFUSE_SECRET_KEY.require()
     env = {
         "LANGSMITH_API_KEY": KEY_PLACEHOLDER,
         "LANGSMITH_ENDPOINT": endpoint,
+        "LANGSMITH_TRACING": "false",
+        "LANGCHAIN_TRACING_V2": "false",
         "LANGSMITH_GATEWAY_BASE_URL": gateway,
         "LANGGRAPH_URL": langgraph_url,
+        "LANGFUSE_BASE_URL": langfuse_base_url,
+        "LANGFUSE_PUBLIC_KEY": KEY_PLACEHOLDER,
+        "LANGFUSE_SECRET_KEY": KEY_PLACEHOLDER,
+        "LANGFUSE_PROJECT_NAME": config["langfuse_project"],
         "REVIEWER_EVAL_REPORT_STORE": "1",
         "REVIEWER_EVAL_CREATED_BY": created_by or "",
+        "REVIEWER_EVAL_TRIGGER": "sandbox",
     }
     async with get_async_sandbox_client() as client:
         sandbox = await client.create_sandbox(
@@ -249,6 +272,9 @@ async def _launch_sandbox(
                 "rules": [
                     _key_rule("langsmith", [endpoint, langgraph_url], api_key),
                     _key_rule("gateway", [gateway], gateway_key),
+                    _langfuse_auth_rule(
+                        langfuse_base_url, langfuse_public_key, langfuse_secret_key
+                    ),
                 ]
             },
             run_config={"env_vars": env},
@@ -268,14 +294,84 @@ async def _launch_sandbox(
     return sandbox.name
 
 
+def _repository_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+async def _launch_local(
+    config: ReviewerEvalConfig, limit: int | None, created_by: str | None
+) -> asyncio.subprocess.Process:
+    """Run the evaluator in this local checkout with inherited local credentials."""
+    env = os.environ.copy()
+    env.update(
+        {
+            "LANGGRAPH_URL": config["langgraph_url"] or ENV.LANGGRAPH_URL.get(),
+            "LANGSMITH_TRACING": "false",
+            "LANGCHAIN_TRACING_V2": "false",
+            "REVIEWER_EVAL_REPORT_STORE": "1",
+            "REVIEWER_EVAL_CREATED_BY": created_by or "",
+            "REVIEWER_EVAL_TRIGGER": "local",
+            "REVIEWER_EVAL_WORKER_ID": "local-dev",
+        }
+    )
+    args = [
+        sys.executable,
+        "-m",
+        "evals.reviewer.run_eval",
+        *_harness_args(config, limit),
+    ]
+    process = await asyncio.create_subprocess_exec(
+        *args,
+        cwd=_repository_root(),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    return process
+
+
+async def _monitor_local_eval(process: asyncio.subprocess.Process) -> None:
+    """Drain child output and reconcile its final status into the shared store."""
+    output_tail = ""
+    if process.stdout is not None:
+        while line := await process.stdout.readline():
+            output_tail = (output_tail + line.decode(errors="replace"))[-LOG_TAIL_CHARS:]
+    exit_code = await process.wait()
+    record = await _get_record() or _idle_record()
+    current_status = record.get("status")
+    status = (
+        current_status
+        if current_status in {"failed", "completed"}
+        else ("completed" if exit_code == 0 else "failed")
+    )
+    error = record.get("error")
+    if exit_code != 0 and not error:
+        error = f"Local reviewer eval process exited with status {exit_code}."
+    await _put_record(
+        {
+            **record,
+            "status": status,
+            "pid": process.pid,
+            "exit_code": exit_code,
+            "finished_at": record.get("finished_at") or now_iso(),
+            "heartbeat": now_iso(),
+            "log_tail": record.get("log_tail") or output_tail or None,
+            "error": error,
+            "trigger": "local",
+        }
+    )
+
+
 async def start_reviewer_eval(
     config: ReviewerEvalConfig, limit: int | None, created_by: str | None
 ) -> dict[str, Any]:
-    """Launch a reviewer eval in a sandbox; raises ``RuntimeError`` if one can't start."""
+    """Launch locally under LangGraph dev, otherwise in the retained sandbox provider."""
     if (await get_reviewer_eval_status()).get("status") in ACTIVE_STATUSES:
         raise RuntimeError("a reviewer eval is already running")
-    ref = backend_build_info()["commit"]
-    if not ref:
+    local = dev_login_enabled()
+    ref = None if local else backend_build_info()["commit"]
+    if not local and not ref:
         raise RuntimeError("the deployment's commit is unknown, so the eval can't match its code")
     started = now_iso()
     record = await _put_record(
@@ -283,18 +379,29 @@ async def start_reviewer_eval(
             **_idle_record(),
             "status": "starting",
             "run_name": config["experiment_prefix"],
-            "langsmith_project": config["langsmith_project"],
+            "langfuse_project": config["langfuse_project"],
             "limit": limit,
             "config_snapshot": config,
             "started_at": started,
             "created_by": created_by,
             "heartbeat": started,
-            "trigger": "sandbox",
+            "trigger": "local" if local else "sandbox",
         }
     )
     try:
+        if local:
+            process = await _launch_local(config, limit, created_by)
+            record = await _put_record(
+                {**record, "worker_id": "local-dev", "pid": process.pid, "trigger": "local"}
+            )
+            task = asyncio.create_task(_monitor_local_eval(process))
+            _LOCAL_TASKS.add(task)
+            task.add_done_callback(_LOCAL_TASKS.discard)
+            return record
+        assert ref is not None
         sandbox_name = await _launch_sandbox(config, limit, created_by, ref)
     except Exception as exc:
-        await _fail(record, f"Couldn't launch the eval sandbox: {exc}")
+        target = "local process" if local else "eval sandbox"
+        await _fail(record, f"Couldn't launch the {target}: {exc}")
         raise
     return await _put_record({**record, "worker_id": sandbox_name})

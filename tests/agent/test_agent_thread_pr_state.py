@@ -164,7 +164,7 @@ async def test_update_agent_thread_pr_state_waits_for_open_prs_when_flagged() ->
     with (
         patch("openswe.webhooks.common.get_client", return_value=fake_client),
         patch("openswe.webhooks.common.agent_thread_pr_state_lock", _unlocked),
-        patch("openswe.webhooks.common.create_langsmith_thread_feedback", AsyncMock()),
+        patch("openswe.webhooks.common.create_thread_trace_score", AsyncMock()),
     ):
         await webhook_common.update_agent_thread_pr_state(_pr_payload(state="closed", merged=True))
 

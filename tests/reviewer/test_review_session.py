@@ -45,7 +45,7 @@ def test_review_chat_is_readable_only_by_its_owner():
 
 @pytest.mark.asyncio
 async def test_failed_walkthrough_is_an_error_after_a_successful_chat_run(monkeypatch):
-    monkeypatch.setattr(summary, "get_langsmith_trace_url", AsyncMock(return_value=None))
+    monkeypatch.setattr(summary, "get_thread_trace_url", AsyncMock(return_value=None))
     item = await summary._thread_summary(
         _review_thread(walkthrough_state="failed", latest_run_status="success")
     )

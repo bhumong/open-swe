@@ -108,6 +108,7 @@ from openswe.utils import ttl_cache
 from openswe.utils.agents_md import fetch_agents_md, fetch_scoped_agents_md
 from openswe.utils.api_standards_skill import fetch_api_standards_skill
 from openswe.utils.deferred_model import make_deferred_error_model
+from openswe.utils.langfuse import configure_graph_tracing
 from openswe.utils.model import (
     DEFAULT_LLM_REASONING,
     ModelKwargs,
@@ -1104,7 +1105,7 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
             middleware=[
                 AnthropicPromptCachingMiddleware(ttl="1h", unsupported_model_behavior="ignore")
             ],
-        ).with_config(bindable_config(config))
+        ).with_config(configure_graph_tracing(bindable_config(config), graph_name="reviewer"))
 
     models = await resolve_reviewer_models(cfg)
     use_gateway = models.use_gateway
@@ -1154,8 +1155,8 @@ async def get_reviewer_agent(config: RunnableConfig) -> Pregel:
                 settle_review_check_on_exit,
             ],
         ),
-    ).with_config(bindable_config(config))
+    ).with_config(configure_graph_tracing(bindable_config(config), graph_name="reviewer"))
 
 
-# langgraph.json entrypoint. Runs trace into LANGSMITH_PROJECT like everything else.
+# langgraph.json entrypoint; graph tracing is configured in both factory paths above.
 traced_reviewer_agent = get_reviewer_agent

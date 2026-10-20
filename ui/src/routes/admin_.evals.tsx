@@ -44,7 +44,7 @@ function ReviewerEvalPage() {
     <AppShell
       user={session.data}
       title="Reviewer Eval"
-      description="Runs the reviewer benchmark in a LangSmith sandbox against this deployment. Progress streams here live."
+      description="Runs the reviewer benchmark locally in development or in an isolated worker when deployed. Progress streams here live."
     >
       <ReviewerEvalRunConfigSection />
       <ReviewerEvalStatusSection />
@@ -105,7 +105,7 @@ function ReviewerEvalRunConfigSection() {
   return (
     <SettingsSection
       title="Run config"
-      description="Defaults to the previous run's config. Each run boots a sandbox at the deployed commit."
+      description="Defaults to the previous run's config. Development runs locally; deployments use an isolated worker."
       action={
         <Button
           size="xs"
@@ -131,7 +131,7 @@ function ReviewerEvalRunConfigSection() {
       />
       <SettingsRow
         label="Run name"
-        description="LangSmith experiment prefix."
+        description="Langfuse experiment name."
         control={
           <Input
             aria-label="Run name"
@@ -159,7 +159,7 @@ function ReviewerEvalRunConfigSection() {
       />
       <SettingsRow
         label="Max concurrency"
-        description="PRs reviewed at once on the deployment."
+        description="PRs reviewed in parallel."
         control={
           <Input
             aria-label="Max concurrency"
@@ -254,7 +254,7 @@ function progressLabel(data: ReviewerEvalStatus): string | null {
   return `${completed} / ${total ?? "?"}`
 }
 
-function ReviewerEvalStatusView({ data }: { data: ReviewerEvalStatus | null }) {
+export function ReviewerEvalStatusView({ data }: { data: ReviewerEvalStatus | null }) {
   if (!data) {
     return (
       <div className="p-space-4 text-xs text-secondary">
@@ -281,9 +281,9 @@ function ReviewerEvalStatusView({ data }: { data: ReviewerEvalStatus | null }) {
       <StatusLine label="Effort" value={config?.reasoning_effort} />
       <StatusLine label="Score mode" value={config?.score_mode} />
       <StatusLine label="Threshold" value={config?.severity_threshold} />
-      <StatusLine label="LangSmith project" value={data.langsmith_project} />
+      <StatusLine label="Langfuse project" value={data.langfuse_project} />
       <StatusLine label="Triggered by" value={data.created_by} />
-      <StatusLine label="Sandbox" value={data.worker_id} />
+      <StatusLine label="Worker" value={data.worker_id} />
       {data.started_at && (
         <StatusLine
           label="Started"
@@ -303,7 +303,7 @@ function ReviewerEvalStatusView({ data }: { data: ReviewerEvalStatus | null }) {
           rel="noreferrer"
           variant="sm"
         >
-          View experiment in LangSmith
+          View experiment in Langfuse
         </MacawLink>
       )}
       {data.error && <span className="text-error-secondary">{data.error}</span>}

@@ -1,4 +1,4 @@
-"""Deferred cumulative LangSmith cost enrichment for Slack replies."""
+"""Deferred cumulative Langfuse cost enrichment for Slack replies."""
 
 import logging
 from collections.abc import Mapping
@@ -17,7 +17,7 @@ from openswe.slack.client import (
     with_slack_session_cost,
 )
 from openswe.slack.http import SlackRequestError
-from openswe.utils.langsmith import LangSmithCostUnavailable, get_langsmith_thread_cost
+from openswe.utils.langfuse import LangfuseCostUnavailable, get_trace_cost
 from openswe.utils.thread_ops import langgraph_client
 
 logger = logging.getLogger(__name__)
@@ -177,21 +177,21 @@ async def _refresh_once(
         return "unavailable", "run has no Slack response"
 
     try:
-        snapshot = await get_langsmith_thread_cost(
+        snapshot = await get_trace_cost(
             payload["agent_thread_id"],
             payload["invocation_id"],
             lookup_start=payload.get("invocation_started_at"),
         )
-        run_snapshot = await get_langsmith_thread_cost(
+        run_snapshot = await get_trace_cost(
             payload["agent_thread_id"],
             payload["invocation_id"],
             run_only=True,
             lookup_start=payload.get("invocation_started_at"),
         )
-    except LangSmithCostUnavailable as exc:
+    except LangfuseCostUnavailable as exc:
         return "unavailable", str(exc)
     if snapshot is None or run_snapshot is None:
-        return "pending", "LangSmith trace or fresh aggregate unavailable"
+        return "pending", "Langfuse trace or fresh aggregate unavailable"
 
     message = await fetch_slack_thread_message_by_ts(
         payload["channel_id"], payload["thread_ts"], message_ts

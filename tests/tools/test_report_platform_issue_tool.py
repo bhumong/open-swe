@@ -1,6 +1,8 @@
 import importlib
 import logging
 import uuid
+from collections.abc import Mapping
+from datetime import datetime
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,14 +19,37 @@ class _Unserializable:
 def export(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     calls: list[dict[str, Any]] = []
 
-    async def create_langsmith_thread_feedback(*args: Any, **kwargs: Any) -> bool:
-        calls.append({"args": args, "kwargs": kwargs})
+    async def create_thread_trace_score(
+        thread_id: str,
+        name: str,
+        *,
+        score: float | None,
+        comment: str | None = None,
+        source_info: Mapping[str, object] | None = None,
+        run_id: str | None = None,
+        timestamp: datetime | None = None,
+    ) -> bool:
+        kwargs: dict[str, object] = {
+            "score": score,
+            "comment": comment,
+            "source_info": source_info,
+        }
+        if run_id is not None:
+            kwargs["run_id"] = run_id
+        if timestamp is not None:
+            kwargs["timestamp"] = timestamp
+        calls.append(
+            {
+                "args": (thread_id, name),
+                "kwargs": kwargs,
+            }
+        )
         return True
 
     monkeypatch.setattr(
         importlib.import_module("openswe.tools.report_platform_issue"),
-        "create_langsmith_thread_feedback",
-        create_langsmith_thread_feedback,
+        "create_thread_trace_score",
+        create_thread_trace_score,
     )
     return calls
 

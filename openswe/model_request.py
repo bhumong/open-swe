@@ -7,13 +7,13 @@ from typing import Literal
 
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_typesafe import Choice
-from langsmith import get_current_run_tree, trace, tracing_context
-from langsmith.run_trees import RunTree
+from langfuse import LangfuseSpan
 
 from openswe.dashboard.options import ModelOption
 from openswe.input_messages import input_message_text, input_message_timestamps, message_sender_id
 from openswe.prompts import prompt
 from openswe.utils.jev import JevDecision, select_jev_choices
+from openswe.utils.langfuse import langfuse_observation
 
 MAX_MODEL_REQUEST_CHARS = 8_000
 
@@ -49,19 +49,9 @@ class ModelSelectionDecision:
 
 
 @asynccontextmanager
-async def model_selection_trace() -> AsyncIterator[RunTree]:
-    parent = get_current_run_tree() or RunTree.from_runnable_config(None)
-    safe_parent = (
-        parent.model_copy(update={"extra": {"metadata": {}}, "tags": []}) if parent else None
-    )
-    with tracing_context(parent=safe_parent or False, metadata={}, tags=[]):
-        async with trace(
-            "Model selection decision",
-            parent=safe_parent,
-            inputs={},
-            exceptions_to_handle=(BaseException,),
-        ) as span:
-            yield span
+async def model_selection_trace() -> AsyncIterator[LangfuseSpan | None]:
+    async with langfuse_observation("Model selection decision", input={}, metadata={}) as span:
+        yield span
 
 
 def original_human_task(

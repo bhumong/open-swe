@@ -1,6 +1,6 @@
 """Publish reviewer-eval progress to the LangGraph store for the dashboard.
 
-When the eval runs in a LangSmith sandbox (``openswe.review.eval_jobs``) it writes the same
+When the eval runs in a sandbox or local child process it writes the same
 store record the dashboard reads (namespace ``["evals"]``, key ``"reviewer"``),
 so ``/admin/evals`` shows the run live. The dashboard reconciles a run whose
 heartbeat goes stale to ``failed`` (see ``openswe.review.eval_jobs``), so the
@@ -57,7 +57,15 @@ class StoreReporter:
         self._completed_getter = completed_getter
         self._tail_getter = tail_getter
         self._experiment_url_getter = experiment_url_getter
-        self._worker_id = os.environ.get("LANGSMITH_SANDBOX_NAME")
+        self._worker_id = os.environ.get("REVIEWER_EVAL_WORKER_ID") or os.environ.get(
+            "LANGSMITH_SANDBOX_NAME"
+        )
+        raw_pid = os.environ.get("REVIEWER_EVAL_PID")
+        try:
+            self._pid = int(raw_pid) if raw_pid else os.getpid()
+        except ValueError:
+            self._pid = os.getpid()
+        self._trigger = os.environ.get("REVIEWER_EVAL_TRIGGER", "sandbox")
         self._started_at = _now_iso()
         # get_client auto-loads the api key from LANGGRAPH/LANGSMITH/LANGCHAIN env.
         self._client = get_client(url=os.environ["LANGGRAPH_URL"])
@@ -67,13 +75,13 @@ class StoreReporter:
             "name": REVIEWER_EVAL_KEY,
             "status": status,
             "run_name": self._config.get("experiment_prefix"),
-            "langsmith_project": self._config.get("langsmith_project"),
+            "langfuse_project": self._config.get("langfuse_project"),
             "limit": self._limit,
             "config_snapshot": self._config,
             "started_at": self._started_at,
             "finished_at": None,
             "created_by": self._created_by,
-            "pid": None,
+            "pid": self._pid if self._trigger == "local" else None,
             "exit_code": None,
             "experiment_url": self._experiment_url_getter(),
             "error": None,
@@ -81,7 +89,7 @@ class StoreReporter:
             "worker_id": self._worker_id,
             "heartbeat": _now_iso(),
             "progress": {"completed": self._completed_getter(), "total": self._total},
-            "trigger": "sandbox",
+            "trigger": self._trigger,
             "updated_at": _now_iso(),
         }
         record.update(overrides)

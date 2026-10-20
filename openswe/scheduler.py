@@ -24,6 +24,7 @@ from openswe.sandboxes.retry import (
 )
 from openswe.schedules.store import launch_scheduled_agent_run
 from openswe.session_cost import run_session_cost_refresh
+from openswe.utils.langfuse import configure_graph_tracing
 from openswe.workspaces.refresh import LEGACY_REFRESH_TASK, run_workspace_refresh_tick
 from openswe.workspaces.refresh import REFRESH_TASK as WORKSPACE_REFRESH_TASK
 
@@ -115,4 +116,6 @@ def get_scheduler(config: RunnableConfig | None = None):
     builder.add_node("launch", _launch)
     builder.add_edge(START, "launch")
     builder.add_edge("launch", END)
-    return builder.compile().with_config(config or {})
+    return builder.compile().with_config(
+        configure_graph_tracing(config or {}, graph_name="scheduler")
+    )

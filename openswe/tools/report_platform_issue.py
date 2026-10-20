@@ -10,7 +10,7 @@ from langgraph.config import get_config
 from openswe.run_config import RunConfig
 from openswe.runtime.execution import bindable_config
 from openswe.tools.mcp_exposure import expose_mcp
-from openswe.utils.langsmith import create_langsmith_thread_feedback
+from openswe.utils.langfuse import create_thread_trace_score
 from openswe.utils.thread_ops import langgraph_client
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,7 @@ async def report_platform_issue(
     thread_id = thread_details.get("configurable", {}).get("thread_id") or ""
     if thread_id:
         try:
-            exported = await create_langsmith_thread_feedback(
+            exported = await create_thread_trace_score(
                 thread_id,
                 f"platform_issue:{report_id}",
                 score=0.0,

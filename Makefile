@@ -1,4 +1,6 @@
-.PHONY: all format format-check lint typecheck test tests integration_tests help run dev dev-ui postgres migration tunnel web build-dashboard desktop install-desktop install-checkout swagger cli
+.PHONY: all format format-check lint typecheck test tests integration_tests help run dev dev-ui postgres migration tunnel web build-dashboard desktop install-desktop install-checkout swagger cli local-setup langfuse-setup langfuse-config langfuse-up langfuse-down langfuse-logs
+
+LOCAL_LANGFUSE_COMPOSE = docker compose --project-name open-swe-langfuse --env-file infra/langfuse/.env -f infra/langfuse/compose.yaml
 
 # Default target executed when no arguments are given to make.
 all: help
@@ -21,6 +23,25 @@ dev: $(if $(POSTGRES_URI),,postgres)
 
 postgres:
 	docker compose up -d --wait postgres
+
+local-setup:
+	uv run python scripts/setup_local_env.py
+
+langfuse-setup:
+	uv run python scripts/setup_local_env.py --langfuse-only
+
+langfuse-config:
+	@test -f infra/langfuse/.env || { echo 'Run make langfuse-setup first.' >&2; exit 1; }
+	$(LOCAL_LANGFUSE_COMPOSE) config --quiet
+
+langfuse-up: langfuse-config
+	$(LOCAL_LANGFUSE_COMPOSE) up -d --wait
+
+langfuse-down:
+	$(LOCAL_LANGFUSE_COMPOSE) down
+
+langfuse-logs:
+	$(LOCAL_LANGFUSE_COMPOSE) logs -f --tail=100
 
 migration:
 	uv run python scripts/new_migration.py "$(m)"
@@ -127,6 +148,10 @@ typecheck:
 
 help:
 	@echo '----'
+	@echo 'local-setup                  - prepare ignored Open SWE and local Langfuse env files'
+	@echo 'langfuse-setup               - create/reuse local Langfuse credentials only'
+	@echo 'langfuse-up                  - validate and start the loopback Langfuse stack'
+	@echo 'langfuse-down                - stop Langfuse while preserving its data volumes'
 	@echo 'dev                          - run LangGraph dev server (starts the local PostgreSQL container unless POSTGRES_URI is set)'
 	@echo 'dev-ui                       - Vite dev server plus the LangGraph dev server fronting it (UI hot reload on :2024)'
 	@echo 'postgres                     - start the local PostgreSQL container on 127.0.0.1:5433'

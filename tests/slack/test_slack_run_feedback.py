@@ -50,7 +50,7 @@ async def saved_feedback(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     )
     monkeypatch.setattr(run_feedback, "record_feedback_submission", AsyncMock())
     save = AsyncMock(return_value=True)
-    monkeypatch.setattr(run_feedback, "create_langsmith_feedback", save)
+    monkeypatch.setattr(run_feedback, "create_trace_score", save)
     return save
 
 

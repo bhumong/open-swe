@@ -68,7 +68,7 @@ from openswe.review.reconcile import reconcile_findings_with_review_threads
 from openswe.run_config import RunConfig
 from openswe.slack.client import post_slack_thread_reply
 from openswe.utils.dashboard_links import dashboard_review_url
-from openswe.utils.langsmith import get_langsmith_trace_url
+from openswe.utils.langfuse import get_thread_trace_url
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +233,7 @@ async def _resolve_review_trace_url(thread_id: str, config_override: bool | None
         return None
     if not thread_id:
         return None
-    return await get_langsmith_trace_url(thread_id)
+    return await get_thread_trace_url(thread_id, external=True)
 
 
 async def _publish_review_eval_dry_run_async(

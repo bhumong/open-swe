@@ -42,7 +42,7 @@ from openswe.transcript.mirror import mirror_thread_metadata
 from openswe.utils.authorship import PR_ATTRIBUTION_TEXT, add_pr_collaboration_note
 from openswe.utils.dashboard_links import dashboard_plan_url, dashboard_thread_url
 from openswe.utils.http_pool import pooled_transport
-from openswe.utils.langsmith import create_langsmith_thread_feedback
+from openswe.utils.langfuse import create_thread_trace_score
 from openswe.utils.run_usage import summarize_run_usage
 
 logger = logging.getLogger(__name__)
@@ -593,14 +593,14 @@ async def _record_pr_opened_feedback(thread_id: str, *, pr_url: str) -> None:
     """Record aggregate and detailed ``pr_opened`` feedback on the thread's trace."""
     source_info = {"source": "open_pull_request", "thread_id": thread_id, "pr_url": pr_url}
     await asyncio.gather(
-        create_langsmith_thread_feedback(
+        create_thread_trace_score(
             thread_id,
             f"github_pr_opened:{pr_url}",
             score=1.0,
             comment=f"Agent-authored pull request opened: {pr_url}",
             source_info=source_info,
         ),
-        create_langsmith_thread_feedback(
+        create_thread_trace_score(
             thread_id,
             PR_OPENED_FEEDBACK_KEY,
             score=1.0,

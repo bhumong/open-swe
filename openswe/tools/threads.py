@@ -52,11 +52,11 @@ from openswe.utils.dashboard_links import (
     dashboard_thread_url,
 )
 from openswe.utils.json_types import as_json_object, thread_metadata
-from openswe.utils.langsmith import (
-    LangSmithCostUnavailable,
-    get_langsmith_thread_cost,
-    get_open_swe_thread_id_from_langsmith,
-    parse_langsmith_locator,
+from openswe.utils.langfuse import (
+    LangfuseCostUnavailable,
+    get_open_swe_thread_id_from_langfuse,
+    get_trace_cost,
+    parse_langfuse_locator,
 )
 from openswe.utils.thread_ops import langgraph_client
 from openswe.utils.thread_participants import PARTICIPANT_LOGINS_KEY, participant_logins
@@ -177,14 +177,13 @@ def _web_link(item: Mapping[str, Any]) -> str | None:
     return dashboard_thread_url(thread_id) if isinstance(thread_id, str) else None
 
 
-def _langsmith_identifiers(trace_url: Any, locator: str | None = None) -> dict[str, Any]:
-    trusted = parse_langsmith_locator(trace_url) if isinstance(trace_url, str) else None
-    supplied = parse_langsmith_locator(locator) if locator else None
-    supplied_run_id = locator.strip() if locator and _looks_uuid(locator) else None
+def _langfuse_identifiers(trace_url: object, locator: str | None = None) -> dict[str, str | None]:
+    trusted = parse_langfuse_locator(trace_url) if isinstance(trace_url, str) else None
+    supplied = parse_langfuse_locator(locator) if locator else None
+    trusted_url = trace_url if isinstance(trace_url, str) and trusted else None
     return {
-        "trace_url": trace_url if trusted else None,
-        "thread_id": trusted.id if trusted and trusted.kind == "thread" else None,
-        "run_id": supplied.id if supplied and supplied.kind == "run" else supplied_run_id,
+        "trace_url": trusted_url,
+        "trace_id": trusted.trace_id if trusted else supplied.trace_id if supplied else None,
     }
 
 
@@ -202,9 +201,9 @@ def _list_item(item: Mapping[str, Any], *, locator: str | None = None) -> dict[s
     result.pop("sandboxBridgeClient", None)
     result.pop("sandboxBridgeOnline", None)
     result["webUrl"] = _web_link(item)
-    langsmith = _langsmith_identifiers(item.get("traceUrl"), locator)
-    if any(value is not None for value in langsmith.values()):
-        result["langsmith"] = langsmith
+    langfuse = _langfuse_identifiers(item.get("traceUrl"), locator)
+    if any(value is not None for value in langfuse.values()):
+        result["langfuse"] = langfuse
     if slack := _slack_identifiers(locator):
         result["slack"] = slack
     return result
@@ -275,7 +274,7 @@ async def list_threads(
 
     normalized_query = query.strip() if isinstance(query, str) else ""
     exact_locator = (
-        parse_langsmith_locator(normalized_query) is not None
+        parse_langfuse_locator(normalized_query) is not None
         or parse_slack_thread_url(normalized_query) is not None
         or (dashboard_thread_id(normalized_query) is not None and "/" in normalized_query)
     )
@@ -555,12 +554,12 @@ async def _thread_cost(thread_id: str, run: Any) -> dict[str, Any]:
         metadata.get("invocation_started_at") if isinstance(metadata, Mapping) else None
     ) or _value(run, "created_at")
     try:
-        snapshot = await get_langsmith_thread_cost(
+        snapshot = await get_trace_cost(
             thread_id,
             invocation_id,
             **({"lookup_start": str(lookup_start)} if lookup_start else {}),
         )
-    except LangSmithCostUnavailable:
+    except LangfuseCostUnavailable:
         return {"status": "unavailable", "total_usd": None}
     except Exception:
         logger.debug("Could not load thread cost for %s", thread_id, exc_info=True)
@@ -662,13 +661,13 @@ async def _private_thread_context(actor: _Actor) -> bool:
 async def _authorized_locator(
     locator: str, actor: _Actor, *, admin_override: bool = False
 ) -> tuple[str, Mapping[str, Any]] | dict[str, Any]:
-    langsmith_locator = parse_langsmith_locator(locator)
+    langfuse_locator = parse_langfuse_locator(locator)
     slack_locator = parse_slack_thread_url(locator)
     thread_id = dashboard_thread_id(locator) or ""
-    if langsmith_locator:
-        thread_id = await get_open_swe_thread_id_from_langsmith(locator) or ""
+    if langfuse_locator:
+        thread_id = await get_open_swe_thread_id_from_langfuse(locator) or ""
         if not thread_id:
-            return _failure("Could not resolve LangSmith trace to an Open SWE thread")
+            return _failure("Could not resolve Langfuse trace to an Open SWE thread")
     elif slack_locator:
         client = langgraph_client()
         thread_id = await lookup_slack_thread_id(client, *slack_locator) or ""
@@ -682,28 +681,14 @@ async def _authorized_locator(
     if not thread_id:
         return _failure(
             "thread_id must be an exact thread ID, Open SWE dashboard URL, Slack link, "
-            "or LangSmith trace URL"
+            "or configured Langfuse trace URL"
         )
-    try:
-        summary = await get_dashboard_thread(
-            thread_id,
-            actor.login,
-            email=actor.email,
-            mark_viewed=False,
-        )
-    except HTTPException as exc:
-        if exc.status_code != 404 or langsmith_locator or not _looks_uuid(locator):
-            raise
-        resolved = await get_open_swe_thread_id_from_langsmith(locator)
-        if not resolved or resolved == thread_id:
-            raise
-        thread_id = resolved
-        summary = await get_dashboard_thread(
-            thread_id,
-            actor.login,
-            email=actor.email,
-            mark_viewed=False,
-        )
+    summary = await get_dashboard_thread(
+        thread_id,
+        actor.login,
+        email=actor.email,
+        mark_viewed=False,
+    )
     if (
         summary.get("visibility") == "private"
         and not admin_override
@@ -848,7 +833,7 @@ async def get_thread(
         "plan": plan,
         "workflow_approvals": _compact_approvals(approvals),
         "links": links,
-        "langsmith": _langsmith_identifiers(summary.get("traceUrl"), locator),
+        "langfuse": _langfuse_identifiers(summary.get("traceUrl"), locator),
         "slack": slack_locator and _slack_identifiers(locator),
         "available_actions": []
         if actor.automation

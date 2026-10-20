@@ -15,7 +15,7 @@ from openswe import agent_cost
 from openswe.analytics import directory, emitter, ingestion, outbox, queries, usage
 from openswe.analytics.events import EventEnvelope
 from openswe.middleware.record_run_usage import record_run_usage
-from openswe.utils.langsmith import LangSmithThreadCost
+from openswe.utils.langfuse import LangfuseThreadCost
 from openswe.utils.run_usage import RunUsageSummary
 from tests.analytics.helpers import DAY
 
@@ -303,8 +303,8 @@ async def test_auth_failure_is_terminal_and_cost_coverage_uses_trace_evidence(
     assert row["invocations"] == 1
     assert row["invocations_without_cost"] == 1
 
-    snapshot = None if trace_cost is None else LangSmithThreadCost(trace_cost, DAY, DAY)
-    monkeypatch.setattr(agent_cost, "get_langsmith_thread_cost", AsyncMock(return_value=snapshot))
+    snapshot = None if trace_cost is None else LangfuseThreadCost(trace_cost, None, DAY, DAY)
+    monkeypatch.setattr(agent_cost, "get_trace_cost", AsyncMock(return_value=snapshot))
     result = await agent_cost.run_agent_cost_refresh(
         {"thread_id": "thread", "invocation_id": "run", "attempt": 4}, client=MagicMock()
     )

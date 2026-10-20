@@ -69,7 +69,7 @@ async def test_reaction_removed_deletes_feedback_when_last_reaction_removed(
         return True
 
     monkeypatch.setattr(slack_feedback, "get_client", lambda url: client)
-    monkeypatch.setattr(slack_feedback, "delete_langsmith_feedback", fake_delete_feedback)
+    monkeypatch.setattr(slack_feedback, "delete_trace_score", fake_delete_feedback)
 
     await process_slack_reaction_removed(_reaction_event(), event_id="Ev2")
 
@@ -89,7 +89,7 @@ async def test_reaction_from_non_triggering_user_is_ignored(
         raise AssertionError("non-triggering user should not create feedback")
 
     monkeypatch.setattr(slack_feedback, "get_client", lambda url: client)
-    monkeypatch.setattr(slack_feedback, "create_langsmith_feedback", fail_create_feedback)
+    monkeypatch.setattr(slack_feedback, "create_trace_score", fail_create_feedback)
 
     await process_slack_reaction_added(_reaction_event(), event_id="Ev1")
 
@@ -119,8 +119,8 @@ async def test_conflicting_reactions_clear_feedback(
         return True
 
     monkeypatch.setattr(slack_feedback, "get_client", lambda url: client)
-    monkeypatch.setattr(slack_feedback, "create_langsmith_feedback", fail_create_feedback)
-    monkeypatch.setattr(slack_feedback, "delete_langsmith_feedback", fake_delete_feedback)
+    monkeypatch.setattr(slack_feedback, "create_trace_score", fail_create_feedback)
+    monkeypatch.setattr(slack_feedback, "delete_trace_score", fake_delete_feedback)
 
     # User adds a thumbsdown alongside the existing thumbsup → conflicting.
     event = {**_reaction_event("thumbsdown"), "type": "reaction_added"}

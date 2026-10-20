@@ -127,7 +127,7 @@ export function ReviewSettings({
             settings={settings}
             fields={["review_trace_links"]}
             label="Reviewer trace links"
-            description="Link each review comment to the reviewer's own LangSmith run. Only members of your LangSmith workspace can open it."
+            description="Link the review to its Langfuse trace. Members with access to the configured Langfuse project can open it."
             control={toggle("review_trace_links", "Reviewer trace links")}
           />
         </div>

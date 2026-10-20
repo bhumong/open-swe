@@ -1,4 +1,4 @@
-"""Run the reviewer eval against the LangSmith dataset.
+"""Run the reviewer benchmark against a Langfuse dataset.
 
 Usage:
     uv run python -m evals.reviewer.run_eval
@@ -12,17 +12,18 @@ import os
 import sys
 import threading
 import tomllib
-from collections.abc import Iterable, Mapping
+import typing
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from dotenv import load_dotenv
+from langfuse import Langfuse
+from langfuse.api import DatasetItem
+from langfuse.experiment import ExperimentItem, ExperimentResult
 from langgraph_sdk import get_client
-from langsmith import Client, aevaluate
-from langsmith.schemas import Example
 
-from evals.reviewer.costs import print_summary, record_experiment_costs
-from evals.reviewer.judge import aggregate_pr, judge_match
+from evals.reviewer import costs, judge
 from evals.reviewer.store_reporter import StoreReporter, is_enabled
 from evals.reviewer.target import (
     drain_thread_ids,
@@ -31,11 +32,13 @@ from evals.reviewer.target import (
     review_pr,
 )
 from openswe.review.eval_store import EXPERIMENT_URL_RE, LOG_TAIL_CHARS
+from openswe.utils.langfuse import get_langfuse_client
+from openswe.utils.typed_json import JsonObject, JsonValue
 
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).with_name("config.toml")
-DEFAULT_LANGSMITH_PROJECT = "open-swe-evals"
+DEFAULT_LANGFUSE_PROJECT = "Open SWE"
 ScoreMode = Literal["all_findings", "surfaced_findings"]
 Severity = Literal["low", "medium", "high", "critical"]
 _VALID_SCORE_MODES: set[str] = {"all_findings", "surfaced_findings"}
@@ -46,8 +49,7 @@ _ENV_MAPPING: dict[str, str] = {
     "experiment_prefix": "REVIEWER_EVAL_EXPERIMENT_PREFIX",
     "max_concurrency": "REVIEWER_EVAL_MAX_CONCURRENCY",
     "langgraph_url": "LANGGRAPH_URL",
-    "langsmith_project": "LANGSMITH_PROJECT",
-    "reviewer_langsmith_project": "REVIEWER_LANGSMITH_PROJECT",
+    "langfuse_project": "LANGFUSE_PROJECT_NAME",
     "assistant_id": "REVIEWER_ASSISTANT_ID",
     "model_id": "REVIEWER_EVAL_MODEL_ID",
     "reasoning_effort": "REVIEWER_EVAL_REASONING_EFFORT",
@@ -61,8 +63,7 @@ class ReviewerEvalConfig(TypedDict, total=False):
     experiment_prefix: str
     max_concurrency: int
     langgraph_url: str
-    langsmith_project: str
-    reviewer_langsmith_project: str
+    langfuse_project: str
     assistant_id: str
     model_id: str
     reasoning_effort: str
@@ -75,7 +76,7 @@ DEFAULT_CONFIG: ReviewerEvalConfig = {
     "experiment_prefix": "openswe-reviewer-baseline",
     "max_concurrency": 10,
     "langgraph_url": "",
-    "langsmith_project": DEFAULT_LANGSMITH_PROJECT,
+    "langfuse_project": DEFAULT_LANGFUSE_PROJECT,
     "assistant_id": "reviewer",
     "model_id": "anthropic:claude-opus-5-5",
     "reasoning_effort": "high",
@@ -91,60 +92,37 @@ def _parse_int(value: str) -> int | None:
         return None
 
 
-def _load_config() -> ReviewerEvalConfig:
-    if not CONFIG_PATH.exists():
-        return {}
-    with CONFIG_PATH.open("rb") as f:
-        raw = tomllib.load(f)
-    return _coerce_config(raw)
-
-
 def _coerce_config(raw: dict[str, Any]) -> ReviewerEvalConfig:
     config: ReviewerEvalConfig = {}
-    dataset_name = raw.get("dataset_name")
-    if isinstance(dataset_name, str) and dataset_name:
-        config["dataset_name"] = dataset_name
-
-    experiment_prefix = raw.get("experiment_prefix")
-    if isinstance(experiment_prefix, str) and experiment_prefix:
-        config["experiment_prefix"] = experiment_prefix
-
-    langgraph_url = raw.get("langgraph_url")
-    if isinstance(langgraph_url, str) and langgraph_url:
-        config["langgraph_url"] = langgraph_url
-
-    langsmith_project = raw.get("langsmith_project")
-    if isinstance(langsmith_project, str) and langsmith_project:
-        config["langsmith_project"] = langsmith_project
-
-    reviewer_langsmith_project = raw.get("reviewer_langsmith_project")
-    if isinstance(reviewer_langsmith_project, str) and reviewer_langsmith_project:
-        config["reviewer_langsmith_project"] = reviewer_langsmith_project
-
-    assistant_id = raw.get("assistant_id")
-    if isinstance(assistant_id, str) and assistant_id:
-        config["assistant_id"] = assistant_id
-
-    model_id = raw.get("model_id")
-    if isinstance(model_id, str) and model_id:
-        config["model_id"] = model_id
-
-    reasoning_effort = raw.get("reasoning_effort")
-    if isinstance(reasoning_effort, str) and reasoning_effort:
-        config["reasoning_effort"] = reasoning_effort
-
+    for key in ("dataset_name", "experiment_prefix", "langgraph_url", "langfuse_project"):
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            config[key] = value  # type: ignore[literal-required]
+    for key in ("assistant_id", "model_id", "reasoning_effort"):
+        value = raw.get(key)
+        if isinstance(value, str) and value:
+            config[key] = value  # type: ignore[literal-required]
     max_concurrency = raw.get("max_concurrency")
-    if isinstance(max_concurrency, int) and max_concurrency > 0:
+    if (
+        isinstance(max_concurrency, int)
+        and not isinstance(max_concurrency, bool)
+        and max_concurrency > 0
+    ):
         config["max_concurrency"] = max_concurrency
-
     score_mode = raw.get("score_mode")
     if score_mode in _VALID_SCORE_MODES:
         config["score_mode"] = score_mode
-
     severity_threshold = raw.get("severity_threshold")
     if severity_threshold in _VALID_SEVERITIES:
         config["severity_threshold"] = severity_threshold
     return config
+
+
+def _load_config() -> ReviewerEvalConfig:
+    if not CONFIG_PATH.exists():
+        return {}
+    with CONFIG_PATH.open("rb") as f:
+        return _coerce_config(tomllib.load(f))
 
 
 def _load_env_config(env: Mapping[str, str] = os.environ) -> ReviewerEvalConfig:
@@ -184,27 +162,18 @@ def _resolve_config(cli_config: ReviewerEvalConfig | None = None) -> ReviewerEva
 
 def _apply_config_to_env(config: ReviewerEvalConfig) -> None:
     for config_key, env_key in _ENV_MAPPING.items():
-        if config_key == "langsmith_project":
-            continue
         value = config.get(config_key)
         if value is not None:
             os.environ[env_key] = str(value)
-    _apply_langsmith_project(config.get("langsmith_project"))
-
-
-def _apply_langsmith_project(project: str | None) -> None:
-    """Route eval traces to a dedicated LangSmith project.
-
-    ``project`` is expected to be the resolved value after CLI/env/config
-    precedence has already been applied.
-    """
-    resolved = project or os.environ.get("LANGSMITH_PROJECT") or DEFAULT_LANGSMITH_PROJECT
-    os.environ["LANGSMITH_PROJECT"] = resolved
-    os.environ.setdefault("LANGSMITH_TRACING", "true")
+    os.environ["LANGGRAPH_URL"] = config.get("langgraph_url") or get_langgraph_url()
+    # LangGraph Platform may inject automatic LangSmith tracing variables. The
+    # eval's graph and experiment traces belong in Langfuse instead.
+    os.environ["LANGSMITH_TRACING"] = "false"
+    os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
 
 class _TailCapture:
-    """Thread-safe rolling tail of eval output + the last LangSmith experiment URL."""
+    """Thread-safe rolling tail of eval output and its Langfuse dataset-run URL."""
 
     def __init__(self) -> None:
         self._buf = ""
@@ -218,7 +187,7 @@ class _TailCapture:
             self._buf = (self._buf + text)[-LOG_TAIL_CHARS:]
             found = EXPERIMENT_URL_RE.findall(self._buf)
             if found:
-                self._url = found[-1]
+                self._url = found[-1].rstrip(".,)")
 
     def tail(self) -> str | None:
         with self._lock:
@@ -244,7 +213,7 @@ class _BufferingHandler(logging.Handler):
 
 
 class _TeeStream:
-    """Write to the original stream and mirror into the capture (for ``print``ed output)."""
+    """Write to the original stream and mirror it into the capture."""
 
     def __init__(self, original: Any, capture: _TailCapture) -> None:
         self._original = original
@@ -261,44 +230,77 @@ class _TeeStream:
         return getattr(self._original, name)
 
 
-def _resolve_total(dataset_name: str, data: str | list[Example]) -> int | None:
-    if isinstance(data, list):
-        return len(data)
+def _load_eval_items(client: Langfuse, dataset_name: str, limit: int | None) -> list[DatasetItem]:
     try:
-        return Client().read_dataset(dataset_name=dataset_name).example_count
-    except Exception:
-        logger.warning("Could not resolve dataset example count for progress", exc_info=True)
-        return None
+        dataset = client.get_dataset(dataset_name)
+    except Exception as exc:  # noqa: BLE001 — dataset control-plane errors must be explicit
+        raise RuntimeError(f"Could not load Langfuse dataset {dataset_name}: {exc}") from exc
+    items = list(dataset.items)
+    if limit:
+        items = items[:limit]
+    if not items:
+        raise RuntimeError(f"Langfuse dataset {dataset_name} has no active items")
+    return items
 
 
-async def _cleanup_threads(thread_ids: Iterable[str]) -> None:
-    """Delete LangGraph threads created during the eval.
+async def _run_item(*, item: ExperimentItem, **_: object) -> JsonObject:
+    if isinstance(item, DatasetItem):
+        raw_input: object = item.input
+    elif isinstance(item, Mapping):
+        raw_input = item.get("input")
+    else:
+        raise ValueError("Langfuse reviewer dataset item must be an object")
+    if not isinstance(raw_input, Mapping):
+        raise ValueError("Langfuse reviewer dataset item input must be an object")
+    inputs: JsonObject = {}
+    for key, value in raw_input.items():
+        if not isinstance(key, str):
+            raise ValueError("Langfuse reviewer dataset item input keys must be strings")
+        value_object: object = value
+        inputs[key] = typing.cast(JsonValue, value_object)
+    return await review_pr(inputs)
 
-    Underlying sandboxes are reclaimed by the provider's TTL — this only
-    drops the LangGraph checkpoint/metadata records.
-    """
-    sdk = get_client(url=get_langgraph_url())
-    for tid in thread_ids:
+
+def _run_dataset_experiment(
+    client: Langfuse, config: ReviewerEvalConfig, items: list[DatasetItem]
+) -> ExperimentResult:
+    return client.run_experiment(
+        name=config["experiment_prefix"],
+        description=(
+            f"Open SWE reviewer benchmark; score mode={config['score_mode']}, "
+            f"severity threshold={config['severity_threshold']}."
+        ),
+        data=items,
+        task=_run_item,
+        evaluators=[judge.judge_match, costs.evaluate_pr_cost],
+        run_evaluators=[judge.aggregate_pr, costs.record_experiment_costs],
+        max_concurrency=config["max_concurrency"],
+        metadata={
+            "langfuse_project": config["langfuse_project"],
+            "dataset_name": config["dataset_name"],
+            "model_id": config["model_id"],
+            "reasoning_effort": config["reasoning_effort"],
+            "score_mode": config["score_mode"],
+            "severity_threshold": config["severity_threshold"],
+        },
+    )
+
+
+async def _run_dataset_experiment_async(
+    client: Langfuse, config: ReviewerEvalConfig, items: list[DatasetItem]
+) -> ExperimentResult:
+    """Run the SDK's sync adapter off-loop so status heartbeats keep flowing."""
+    return await asyncio.to_thread(_run_dataset_experiment, client, config, items)
+
+
+async def _cleanup_threads(thread_ids: set[str]) -> None:
+    """Delete LangGraph checkpoint/metadata records created by this evaluation."""
+    client = get_client(url=get_langgraph_url())
+    for thread_id in thread_ids:
         try:
-            await sdk.threads.delete(tid)
-        except Exception as exc:
-            logger.warning("Failed to delete thread %s: %s", tid, exc)
-
-
-async def _record_costs(experiment: str, reviewer_project: str | None) -> None:
-    if not reviewer_project:
-        logger.warning(
-            "Skipping cost collection: pass --reviewer-langsmith-project",
-            extra={"experiment": experiment},
-        )
-        return
-    try:
-        print_summary(await record_experiment_costs(experiment, reviewer_project))
-    except Exception:
-        logger.exception(
-            "Cost collection failed; re-run evals.reviewer.costs",
-            extra={"experiment": experiment, "reviewer_project": reviewer_project},
-        )
+            await client.threads.delete(thread_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to delete thread %s: %s", thread_id, exc)
 
 
 async def main() -> None:
@@ -308,68 +310,53 @@ async def main() -> None:
     )
     load_dotenv()
 
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--limit", type=int, default=None, help="Run only the first N examples.")
-    ap.add_argument("--dataset-name", dest="dataset_name")
-    ap.add_argument("--experiment-prefix", dest="experiment_prefix")
-    ap.add_argument("--max-concurrency", dest="max_concurrency", type=int)
-    ap.add_argument("--langgraph-url", dest="langgraph_url")
-    ap.add_argument("--langsmith-project", dest="langsmith_project")
-    ap.add_argument(
-        "--reviewer-langsmith-project",
-        dest="reviewer_langsmith_project",
-        help="Project the reviewer server traces into, for per-PR cost "
-        "(default: LANGSMITH_PROJECT before the eval overrides it).",
-    )
-    ap.add_argument("--assistant-id", dest="assistant_id")
-    ap.add_argument("--model-id", dest="model_id")
-    ap.add_argument("--reasoning-effort", dest="reasoning_effort")
-    ap.add_argument("--score-mode", dest="score_mode", choices=sorted(_VALID_SCORE_MODES))
-    ap.add_argument(
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--limit", type=int, default=None, help="Run only the first N examples.")
+    parser.add_argument("--dataset-name", dest="dataset_name")
+    parser.add_argument("--experiment-prefix", dest="experiment_prefix")
+    parser.add_argument("--max-concurrency", dest="max_concurrency", type=int)
+    parser.add_argument("--langgraph-url", dest="langgraph_url")
+    parser.add_argument("--langfuse-project", dest="langfuse_project")
+    parser.add_argument("--assistant-id", dest="assistant_id")
+    parser.add_argument("--model-id", dest="model_id")
+    parser.add_argument("--reasoning-effort", dest="reasoning_effort")
+    parser.add_argument("--score-mode", dest="score_mode", choices=sorted(_VALID_SCORE_MODES))
+    parser.add_argument(
         "--severity-threshold",
         dest="severity_threshold",
         choices=sorted(_VALID_SEVERITIES),
     )
-    ap.add_argument(
+    parser.add_argument(
         "--no-cleanup",
         action="store_true",
         help="Skip deleting LangGraph threads after the experiment finishes.",
     )
-    args = ap.parse_args()
+    args = parser.parse_args()
     config = _resolve_config(_config_from_args(args))
-    # The eval process retargets LANGSMITH_PROJECT at the eval project; the local
-    # server loads the same .env, so the original value is where its traces go.
-    reviewer_project = config.get("reviewer_langsmith_project") or os.environ.get(
-        "LANGSMITH_PROJECT"
-    )
     _apply_config_to_env(config)
+    client = get_langfuse_client()
+    if client is None:
+        raise RuntimeError("Langfuse credentials are required to run the reviewer evaluation")
 
     dataset_name = config["dataset_name"]
-    experiment_prefix = config["experiment_prefix"]
-    max_concurrency = config["max_concurrency"]
+    items = _load_eval_items(client, dataset_name, args.limit)
     logger.info(
-        "Starting reviewer eval: dataset=%s experiment_prefix=%s max_concurrency=%s "
+        "Starting reviewer eval: dataset=%s items=%s experiment=%s concurrency=%s "
         "model=%s effort=%s score_mode=%s severity_threshold=%s project=%s "
         "assistant_id=%s langgraph_url=%s limit=%s",
         dataset_name,
-        experiment_prefix,
-        max_concurrency,
+        len(items),
+        config["experiment_prefix"],
+        config["max_concurrency"],
         config["model_id"],
         config["reasoning_effort"],
         config["score_mode"],
         config["severity_threshold"],
-        config["langsmith_project"],
+        config["langfuse_project"],
         config["assistant_id"],
-        config["langgraph_url"] or "(default)",
+        config["langgraph_url"] or get_langgraph_url(),
         args.limit,
     )
-
-    data: str | list[Example]
-    if args.limit:
-        client = Client()
-        data = list(client.list_examples(dataset_name=dataset_name, limit=args.limit))
-    else:
-        data = dataset_name
 
     reporter: StoreReporter | None = None
     heartbeat: asyncio.Task[None] | None = None
@@ -386,7 +373,7 @@ async def main() -> None:
         reporter = StoreReporter(
             config=dict(config),
             limit=args.limit,
-            total=_resolve_total(dataset_name, data),
+            total=len(items),
             created_by=None,
             completed_getter=get_completed_count,
             tail_getter=capture.tail,
@@ -397,16 +384,11 @@ async def main() -> None:
 
     eval_error: BaseException | None = None
     try:
-        results = await aevaluate(
-            review_pr,
-            data=data,
-            evaluators=[judge_match],
-            summary_evaluators=[aggregate_pr],
-            experiment_prefix=experiment_prefix,
-            max_concurrency=max_concurrency,
-            num_repetitions=1,
-        )
-        await _record_costs(results.experiment_name, reviewer_project)
+        result = await _run_dataset_experiment_async(client, config, items)
+        print(result.format())
+        if result.dataset_run_url:
+            print(f"Langfuse experiment URL: {result.dataset_run_url}")
+        costs.print_summary(costs.summarize_experiment_costs(result.item_results))
     except BaseException as exc:
         eval_error = exc
         raise
@@ -422,6 +404,10 @@ async def main() -> None:
         if log_handler is not None:
             logging.getLogger().removeHandler(log_handler)
         sys.stdout = original_stdout
+        try:
+            client.flush()
+        except Exception:  # noqa: BLE001 — flush failures must not hide the eval result
+            logger.warning("Could not flush Langfuse client", exc_info=True)
         if not args.no_cleanup:
             thread_ids = drain_thread_ids()
             if thread_ids:

@@ -748,7 +748,7 @@ class WorkspaceSettings(Mapping[str, Any]):
 
     @property
     def review_trace_links_enabled(self) -> bool:
-        """Whether GitHub review bodies should include a LangSmith trace link."""
+        """Whether GitHub review bodies should include a Langfuse trace link."""
         return bool(self.get("review_trace_links", True))
 
     @property

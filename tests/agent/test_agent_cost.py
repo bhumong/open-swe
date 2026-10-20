@@ -28,12 +28,12 @@ def _state(attempt: int) -> dict[str, Any]:
 async def test_refresh_gives_up_when_cost_never_appears(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setattr(agent_cost, "get_langsmith_thread_cost", AsyncMock(return_value=None))
+    monkeypatch.setattr(agent_cost, "get_trace_cost", AsyncMock(return_value=None))
     client = _Client()
 
     with caplog.at_level(logging.INFO, logger=agent_cost.__name__):
         result = await agent_cost.run_agent_cost_refresh(_state(4), client=client)
 
-    assert result == {"status": "exhausted", "reason": "LangSmith cost unavailable"}
+    assert result == {"status": "exhausted", "reason": "Langfuse cost unavailable"}
     assert client.runs.created == []
     assert "Agent cost refresh exhausted" in caplog.text

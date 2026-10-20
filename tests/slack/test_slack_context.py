@@ -314,7 +314,7 @@ def _setup_slack_mention_fakes(
         threads = _FakeThreadsClientForProcess()
 
     monkeypatch.setenv("DASHBOARD_BASE_URL", "https://app.example.com")
-    monkeypatch.setattr(slack_webhooks, "get_langsmith_trace_url", _fake_trace_url)
+    monkeypatch.setattr(slack_webhooks, "get_thread_trace_url", _fake_trace_url)
     monkeypatch.setattr(webhook_common, "SLACK_BOT_USERNAME", "open-swe")
     monkeypatch.setattr(webhook_common, "get_slack_user_info", fake_get_slack_user_info)
     monkeypatch.setattr(
@@ -1254,7 +1254,7 @@ async def test_performance_directive_switches_unless_quoted(
         ),
     )
     feedback = AsyncMock(return_value=True)
-    monkeypatch.setattr(slack_webhooks, "create_langsmith_feedback", feedback)
+    monkeypatch.setattr(slack_webhooks, "create_trace_score", feedback)
     notice = AsyncMock(return_value=True)
     monkeypatch.setattr(slack_utils, "post_slack_ephemeral_message", notice)
     dispatch = AsyncMock(return_value={"run_id": "run-perf"})

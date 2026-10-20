@@ -83,7 +83,7 @@ async def thread_api(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[ThreadAPI
     ) as http:
         client = LangGraphClient(http)
         monkeypatch.setattr(listing, "langgraph_client", lambda: client)
-        monkeypatch.setattr(summary, "get_langsmith_trace_url", AsyncMock(return_value=None))
+        monkeypatch.setattr(summary, "get_thread_trace_url", AsyncMock(return_value=None))
         monkeypatch.setattr(summary, "is_admin", lambda email, *, login: email == "admin@test")
         yield api
 

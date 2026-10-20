@@ -9,7 +9,7 @@ from langgraph_sdk.client import LangGraphClient
 
 from openswe.config import ENV
 from openswe.slack.client import lookup_slack_run_mapping
-from openswe.utils.langsmith import create_langsmith_feedback, delete_langsmith_feedback
+from openswe.utils.langfuse import create_trace_score, delete_trace_score
 from openswe.utils.reviewer_outcomes import outcome_from_score as _outcome_from_score
 from openswe.utils.reviewer_outcomes import upsert_run_outcome
 
@@ -157,6 +157,8 @@ async def process_slack_reaction(
     if not isinstance(run_id_value, str) or not run_id_value:
         return
     run_id = run_id_value
+    thread_id_value = mapping.get("agent_thread_id")
+    thread_id = thread_id_value if isinstance(thread_id_value, str) else None
 
     triggering_user_id = mapping.get("triggering_user_id")
     if isinstance(triggering_user_id, str) and triggering_user_id and triggering_user_id != user_id:
@@ -188,14 +190,15 @@ async def process_slack_reaction(
     }
     score = _score_reactions(active_reactions)
     if score is None:
-        success = await delete_langsmith_feedback(run_id, key)
+        success = await delete_trace_score(run_id, key)
     else:
-        success = await create_langsmith_feedback(
+        success = await create_trace_score(
             run_id,
             key,
             score=score,
             comment=f"Slack reaction feedback from user {user_id}",
             source_info={**source_info, "reactions": sorted(active_reactions)},
+            thread_id=thread_id,
         )
 
     outcome = _outcome_from_score(score, source="slack")

@@ -29,7 +29,7 @@ from openswe.utils.json_types import (
     as_thread_dict,
     thread_metadata,
 )
-from openswe.utils.langsmith import get_langsmith_trace_url
+from openswe.utils.langfuse import get_thread_trace_url
 from openswe.utils.timing import phase
 
 logger = logging.getLogger(__name__)
@@ -463,7 +463,9 @@ async def _thread_summary(
     thread_category, origin, trigger_kind = _thread_classification(metadata)
 
     thread_id = thread.get("thread_id") or thread.get("id")
-    trace_url = await get_langsmith_trace_url(thread_id) if isinstance(thread_id, str) else None
+    trace_url = (
+        await get_thread_trace_url(thread_id, latest_run_id) if isinstance(thread_id, str) else None
+    )
 
     raw_sandbox_id = metadata.get("sandbox_id")
     sandbox_id = (

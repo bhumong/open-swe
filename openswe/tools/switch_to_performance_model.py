@@ -11,7 +11,7 @@ from openswe.dashboard.workspace_settings_cache import cached_workspace_settings
 from openswe.run_config import RunConfig
 from openswe.slack.client import post_slack_ephemeral_message
 from openswe.slack.dm import is_concierge_thread
-from openswe.utils.langsmith import create_langsmith_feedback
+from openswe.utils.langfuse import create_trace_score
 from openswe.utils.thread_ops import langgraph_client
 from openswe.utils.thread_settings import load_thread_settings, store_thread_settings
 
@@ -46,11 +46,12 @@ async def switch_to_performance_model(
     )
     await store_thread_settings(client, cfg.thread_id, settings, strict=True)
     if cfg.run_id:
-        await create_langsmith_feedback(
+        await create_trace_score(
             cfg.run_id,
             "performance_model_switch_tool",
             score=1,
             source_info={"model_id": model_id, "effort": effort},
+            thread_id=cfg.thread_id,
         )
     confirmation = f"Switched to {model_id} (reasoning effort: {effort or 'default'})."
     if cfg.slack_thread and cfg.slack_thread.triggering_user_id:

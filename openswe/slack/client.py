@@ -37,7 +37,7 @@ from openswe.threads.creation import create_lock_thread
 from openswe.utils.dashboard_links import dashboard_thread_url
 from openswe.utils.http import DEFAULT_HTTP_TIMEOUT
 from openswe.utils.http_pool import pooled_transport
-from openswe.utils.langsmith import get_langsmith_trace_url
+from openswe.utils.langfuse import get_thread_trace_url
 from openswe.utils.run_usage import RunUsageSummary
 from openswe.utils.url_safety import UnsafeUrlError, request_with_safe_redirects
 from openswe.utils.user_messages import WARNING_ICON
@@ -1821,7 +1821,7 @@ async def post_slack_trace_reply(
     channel_id: str, thread_ts: str, thread_id: str, *, include_dashboard_link: bool = True
 ) -> str | None:
     """Post a trace URL reply in a Slack thread and return its Slack timestamp."""
-    trace_url = await get_langsmith_trace_url(thread_id)
+    trace_url = await get_thread_trace_url(thread_id, external=True)
     dashboard_url = dashboard_thread_url(thread_id) if include_dashboard_link else None
     message_ts = await post_slack_thread_reply_with_ts(
         channel_id,
@@ -1838,7 +1838,7 @@ async def update_slack_trace_reply_for_web_handoff(
     channel_id: str, message_ts: str, thread_id: str
 ) -> bool:
     """Update the initial Slack trace reply after a dashboard handoff."""
-    trace_url = await get_langsmith_trace_url(thread_id)
+    trace_url = await get_thread_trace_url(thread_id, external=True)
     dashboard_url = dashboard_thread_url(thread_id)
     try:
         await update_slack_message(
